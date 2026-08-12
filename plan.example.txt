@@ -4,10 +4,21 @@
 WAKE_START=9
 WAKE_END=20
 
-# banner = passive notification (default).
-# alert  = modal with Did it / Skip / Snooze buttons; steals focus, but one
-#          click logs the set on your way back to the desk.
-STYLE=banner
+# picker = modal list of the day's options plus "Other..." and "Skip this one"
+#          (default). Pops in front of whatever you are doing and waits, so one
+#          click on the way back from the set logs it. "Other..." opens a text
+#          field for whatever you actually did.
+# banner = passive Notification Center banner. Usually shows NOTHING on this
+#          Mac: osascript posts under a bundle with no notification permission
+#          entry, so macOS drops it without a word. Kept only for reference.
+STYLE=picker
+
+# System sound played with every nudge. Empty to silence.
+# Others: Glass, Funk, Submarine, Hero, Sosumi, Blow, Basso
+SOUND=Ping
+
+# SPEAK=yes reads the exercise aloud. Genuinely hard to ignore.
+SPEAK=
 
 # Which calendars count as "busy". Empty = all of them, which is the right
 # default: all-day events are already excluded, so birthdays and subscribed
@@ -15,16 +26,16 @@ STYLE=banner
 # control starts suppressing nudges, e.g. BUSY_CALENDARS=Work,Home
 BUSY_CALENDARS=
 
-# One line per weekday. A trailing "xN" is read as the prescribed rep count,
-# so `gtg` with no argument logs that number.
-mon: pull-ups x5
-tue: push-ups x20
-wed: farmer walk, 1 min heavy
-thu: pull-ups x5
-fri: push-ups x20
-sat: dead hang, 30s
-sun: rest day, just walk
+# One line per weekday. Separate several choices with "|" and the picker offers
+# all of them, first one preselected. A trailing "xN" is read as the rep count.
+mon: pull-ups x5 | push-ups x20 | dead hang 30s
+tue: push-ups x20 | air squats x20 | calf raises x25
+wed: farmer walk 1 min | pull-ups x5 | push-ups x20
+thu: pull-ups x5 | push-ups x20 | dead hang 30s
+fri: push-ups x20 | air squats x20 | farmer walk 1 min
+sat: dead hang 30s | pull-ups x5 | 5 min walk
+sun: 10 min walk | mobility 5 min | rest
 
 # Used whenever you are not on the home network, and as the fallback if a
 # weekday line above is missing.
-away: stand up, 2 min walk, 20 calf raises
+away: 2 min walk | 20 calf raises | 20 air squats | stairs, 2 flights

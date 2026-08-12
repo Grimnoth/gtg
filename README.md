@@ -18,8 +18,10 @@ brew install ical-buddy     # optional, enables meeting detection
 ## Use
 
 ```
-gtg            log today's prescribed set as done
-gtg 12         log 12 reps of today's exercise
+gtg            log today's first option as done
+gtg 12         log 12 reps of that option
+gtg "rows x10" log whatever you actually did
+gtg options    list today's choices
 gtg skip       record a miss
 gtg today      today's tally
 gtg week       the last 7 days, one bar per day
@@ -29,6 +31,40 @@ gtg edit       open the plan in $EDITOR
 
 The plan lives at `~/.config/gtg/plan.txt` and is re-read on every nudge, so
 edits take effect immediately. No reload.
+
+## The nudge itself
+
+A modal picker listing the day's options, first one preselected, plus
+**Other...** and **Skip this one**. Buttons are **Log it** and **Snooze**.
+
+- Pick an option and **Log it** records it.
+- **Other...** opens a text field for whatever you actually did instead. A
+  trailing `xN` in what you type is read as the rep count.
+- **Snooze**, or letting it time out after 15 minutes, deliberately leaves the
+  slot unconsumed, so the next fire retries rather than skipping the hour.
+
+Offer several choices for a day by separating them with `|`:
+
+```
+wed: farmer walk 1 min | pull-ups x5 | push-ups x20
+```
+
+One dialog at a time. A lock file stops a second nudge from stacking a second
+window on top of an unanswered one, and the 15 minute ceiling stops an ignored
+dialog from holding that lock forever and muting everything after it.
+
+## Why a window and not a notification
+
+`osascript`'s `display notification` posts under a bundle that has **no entry**
+in `~/Library/Preferences/com.apple.ncprefs` on this Mac. macOS accepts the
+notification and discards it. The job fires, exits 0, writes a success line to
+its log, and nothing ever appears on screen. That was measured here, not
+assumed, and it is the worst failure shape available: a reminder system that
+reports success nine times a day while reminding you of nothing.
+
+A modal window is an ordinary window. No notification permission, no Focus
+suppression, no auto-dismiss after five seconds. `STYLE=banner` still exists in
+the plan file for reference, but expect it to show nothing.
 
 ## When it fires
 
@@ -105,6 +141,7 @@ than a reminder system that quietly stops reminding and takes a week to notice.
 | `~/.local/state/gtg/log.tsv` | The log. `iso8601 · exercise · reps · home\|away` |
 | `~/.local/state/gtg/nudge.log` | What the scheduled job did, and why it skipped. |
 | `~/.local/state/gtg/last-nudge` | Debounce stamp. Delete it to re-arm now. |
+| `~/.local/state/gtg/nudge.lock` | Held while a dialog is open. |
 
 ## Uninstall
 

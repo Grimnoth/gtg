@@ -47,7 +47,19 @@ where_am_i() {
   fi
 }
 
-# The prescribed movement for right now, given home|away.
+# The day's options, one per line. A plan line may offer several separated by
+# "|"; the first is the default selection.
+today_options() {
+  today_line "$1" \
+    | tr '|' '\n' \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+    | grep -v '^$'
+}
+
+# Just the first option, for logging and for one-line summaries.
+primary_option() { today_options "$1" | head -1; }
+
+# The raw plan line for right now, given home|away.
 today_line() {
   local where="$1" dow line
   dow=$(date +%a | tr '[:upper:]' '[:lower:]')

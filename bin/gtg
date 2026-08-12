@@ -6,8 +6,10 @@ set -u
 
 usage() {
   cat <<'EOF'
-gtg            log today's prescribed set as done
-gtg 12         log 12 reps of today's exercise
+gtg            log today's first option as done
+gtg 12         log 12 reps of that option
+gtg "rows x10" log whatever you actually did
+gtg options    list today's choices
 gtg skip       record a miss
 gtg today      today's tally
 gtg week       the last 7 days, one line per day
@@ -17,12 +19,14 @@ EOF
 }
 
 where=$(where_am_i)
-line=$(today_line "$where")
+line=$(primary_option "$where")
 
 case "${1:-done}" in
   help|-h|--help) usage ;;
 
   plan) cat "$PLAN" ;;
+
+  options) today_options "$where" ;;
 
   edit) "${EDITOR:-vi}" "$PLAN" ;;
 
@@ -76,9 +80,9 @@ case "${1:-done}" in
       record "$line" "$1" "$where"
       echo "logged: $line -> $1 reps  [$where]"
     else
-      echo "unknown argument: $1" >&2
-      usage >&2
-      exit 2
+      # Anything else is whatever you actually did: gtg "chin-ups x8"
+      record "$1" "$(reps_from_line "$1")" "$where"
+      echo "logged: $1  [$where]"
     fi
     ;;
 esac
