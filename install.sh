@@ -10,7 +10,7 @@ LABEL="com.grimnoth.gtg"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 mkdir -p "$CONF_DIR" "$STATE_DIR" "$HOME/.local/bin" "$HOME/Library/LaunchAgents"
-chmod +x "$REPO/bin/gtg" "$REPO/bin/gtg-nudge"
+chmod +x "$REPO/bin/gtg" "$REPO/bin/gtg-nudge" "$REPO/bin/gtg-page"
 
 # --- plan.txt: seeded once, then it is yours. Never overwritten. -------------
 if [ ! -f "$CONF_DIR/plan.txt" ]; then

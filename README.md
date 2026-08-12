@@ -27,6 +27,7 @@ gtg today      today's tally
 gtg week       the last 7 days, one bar per day
 gtg history    the last 30 days (gtg history 90 for more)
 gtg stats      totals by exercise, all time
+gtg page       open the visual history in a browser
 gtg plan       print the current plan
 gtg edit       open the plan in $EDITOR
 ```
@@ -67,6 +68,21 @@ reports success nine times a day while reminding you of nothing.
 A modal window is an ordinary window. No notification permission, no Focus
 suppression, no auto-dismiss after five seconds. `STYLE=banner` still exists in
 the plan file for reference, but expect it to show nothing.
+
+## The history page
+
+`gtg page` renders `log.tsv` to `~/.local/state/gtg/history.html` and opens it:
+a 26 week heatmap, streaks, today's sets, and breakdowns by exercise, by hour
+of day, and home versus away.
+
+Regenerated from the live log on every run, so it is never stale. It is a local
+file on purpose rather than a hosted page: the log changes hourly, so anything
+published would be a snapshot that silently goes out of date, and this is a
+personal record with no reason to leave the machine.
+
+The by-hour breakdown is the one worth watching. Grease-the-groove lives or
+dies on spread, and it will show you plainly if every set is really landing in
+one clump after lunch.
 
 ## When it fires
 

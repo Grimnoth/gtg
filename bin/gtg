@@ -15,6 +15,7 @@ gtg today      today's tally
 gtg week       the last 7 days, one line per day
 gtg history    the last 30 days (gtg history 90 for more)
 gtg stats      totals by exercise, all time
+gtg page       open the visual history in a browser
 gtg plan       print the current plan
 gtg edit       open plan.txt in $EDITOR
 EOF
@@ -29,6 +30,8 @@ case "${1:-done}" in
   plan) cat "$PLAN" ;;
 
   options) today_options "$where" ;;
+
+  page) exec "$(dirname "$0")/gtg-page" "${@:2}" ;;
 
   edit) "${EDITOR:-vi}" "$PLAN" ;;
 

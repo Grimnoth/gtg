@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""Render ~/.local/state/gtg/log.tsv as a self-contained HTML page.
+
+Regenerated from the live log on every run, so it is never stale. Written next
+to the log rather than published anywhere: this is a personal record, and a
+hosted copy would be a snapshot that quietly goes out of date.
+"""
+import html
+import os
+import subprocess
+import sys
+from collections import Counter, defaultdict
+from datetime import date, datetime, timedelta
+
+STATE = os.path.expanduser("~/.local/state/gtg")
+LOG = os.path.join(STATE, "log.tsv")
+OUT = os.path.join(STATE, "history.html")
+WEEKS = 26
+
+
+def load():
+    rows = []
+    if not os.path.exists(LOG):
+        return rows
+    with open(LOG, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 4:
+                continue
+            ts, ex, reps, where = parts[0], parts[1], parts[2], parts[3]
+            try:
+                dt = datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
+            except ValueError:
+                continue
+            rows.append(
+                {
+                    "dt": dt,
+                    "ex": ex or "(unnamed)",
+                    "reps": int(reps) if reps.isdigit() else 0,
+                    "where": where,
+                    "skip": reps == "skip",
+                }
+            )
+    return rows
+
+
+def streaks(days_with_sets, today):
+    """(current, longest) run of consecutive days holding at least one set."""
+    if not days_with_sets:
+        return 0, 0
+    cur = 0
+    d = today
+    # Yesterday still counts as live: today may simply not have happened yet.
+    if d not in days_with_sets:
+        d -= timedelta(days=1)
+    while d in days_with_sets:
+        cur += 1
+        d -= timedelta(days=1)
+    longest = run = 0
+    for i, day in enumerate(sorted(days_with_sets)):
+        run = run + 1 if i and day - prev == timedelta(days=1) else 1
+        longest = max(longest, run)
+        prev = day
+    return cur, longest
+
+
+def main():
+    rows = load()
+    today = date.today()
+
+    per_day = Counter()
+    skips_per_day = Counter()
+    per_ex = Counter()
+    reps_per_ex = Counter()
+    per_hour = Counter()
+    per_where = Counter()
+    total_reps = 0
+
+    for r in rows:
+        d = r["dt"].date()
+        if r["skip"]:
+            skips_per_day[d] += 1
+            continue
+        per_day[d] += 1
+        per_ex[r["ex"]] += 1
+        reps_per_ex[r["ex"]] += r["reps"]
+        per_hour[r["dt"].hour] += 1
+        per_where[r["where"]] += 1
+        total_reps += r["reps"]
+
+    total_sets = sum(per_day.values())
+    active = len(per_day)
+    cur_streak, best_streak = streaks(set(per_day), today)
+
+    # --- heatmap grid, Sunday-first columns like a contribution graph --------
+    end = today
+    start = end - timedelta(days=WEEKS * 7 - 1)
+    start -= timedelta(days=(start.weekday() + 1) % 7)
+    peak = max(per_day.values()) if per_day else 0
+
+    weeks = []
+    d = start
+    while d <= end:
+        col = []
+        for _ in range(7):
+            col.append(None if d > end else (d, per_day.get(d, 0)))
+            d += timedelta(days=1)
+        weeks.append(col)
+
+    cells = []
+    for col in weeks:
+        cells.append('<div class="wk">')
+        for cell in col:
+            if cell is None:
+                cells.append('<i class="d pad"></i>')
+                continue
+            day, n = cell
+            lvl = 0 if not n else min(4, 1 + int(3 * (n - 1) / max(1, peak - 1)))
+            label = f"{day.isoformat()} · {n} set{'s' if n != 1 else ''}"
+            cells.append(f'<i class="d l{lvl}" title="{html.escape(label)}"></i>')
+        cells.append("</div>")
+    heat = "".join(cells)
+
+    # --- month labels across the top -----------------------------------------
+    months, seen = [], None
+    for col in weeks:
+        first = next((c for c in col if c), None)
+        tag = ""
+        if first and first[0].month != seen:
+            seen = first[0].month
+            tag = first[0].strftime("%b")
+        months.append(f'<span class="mo">{tag}</span>')
+    month_row = "".join(months)
+
+    def bars(counter, fmt=lambda k, v: f"{v}"):
+        if not counter:
+            return '<p class="empty">nothing yet</p>'
+        top = max(counter.values())
+        out = []
+        for k, v in counter.most_common():
+            pct = 100 * v / top
+            out.append(
+                f'<div class="row"><span class="k">{html.escape(str(k))}</span>'
+                f'<span class="track"><span class="fill" style="width:{pct:.1f}%"></span></span>'
+                f'<span class="v">{fmt(k, v)}</span></div>'
+            )
+        return "".join(out)
+
+    ex_bars = bars(per_ex, lambda k, v: f"{v} ×" + (f" · {reps_per_ex[k]} reps" if reps_per_ex[k] else ""))
+
+    hours = Counter({f"{h:02d}:00": per_hour[h] for h in sorted(per_hour)})
+    hour_bars = bars(hours)
+
+    where_bars = bars(per_where)
+
+    todays = [r for r in rows if r["dt"].date() == today]
+    if todays:
+        items = "".join(
+            f'<li><span class="t">{r["dt"].strftime("%H:%M")}</span>'
+            f'<span class="e">{html.escape(r["ex"])}</span>'
+            f'<span class="m">{"skipped" if r["skip"] else (str(r["reps"]) + " reps" if r["reps"] else "")}'
+            f'{"" if r["where"] == "home" else " · away"}</span></li>'
+            for r in todays
+        )
+        today_html = f"<ul class='today'>{items}</ul>"
+    else:
+        today_html = '<p class="empty">nothing logged today yet</p>'
+
+    stamp = datetime.now().strftime("%a %d %b %Y, %H:%M")
+    page = TEMPLATE.format(
+        total_sets=total_sets,
+        total_reps=total_reps,
+        active=active,
+        cur_streak=cur_streak,
+        best_streak=best_streak,
+        weeks=WEEKS,
+        heat=heat,
+        month_row=month_row,
+        ex_bars=ex_bars,
+        hour_bars=hour_bars,
+        where_bars=where_bars,
+        today=today_html,
+        stamp=stamp,
+    )
+
+    os.makedirs(STATE, exist_ok=True)
+    with open(OUT, "w", encoding="utf-8") as fh:
+        fh.write(page)
+    print(OUT)
+    if "--no-open" not in sys.argv:
+        subprocess.run(["/usr/bin/open", OUT], check=False)
+
+
+TEMPLATE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GTG history</title>
+<style>
+:root {{
+  --bg:#fbfbf9; --card:#fff; --ink:#1a1a18; --dim:#6b6b63; --line:#e6e6e0;
+  --a0:#ecece6; --a1:#cde8d0; --a2:#8fd09b; --a3:#4fae66; --a4:#2e7d46;
+}}
+@media (prefers-color-scheme: dark) {{
+  :root:not([data-theme="light"]) {{
+    --bg:#131313; --card:#1c1c1b; --ink:#ececea; --dim:#8f8f88; --line:#2c2c2a;
+    --a0:#242422; --a1:#1e4a2c; --a2:#2c7343; --a3:#43a05c; --a4:#63cd7e;
+  }}
+}}
+* {{ box-sizing:border-box; }}
+body {{ margin:0; padding:2.5rem 1.25rem 4rem; background:var(--bg); color:var(--ink);
+  font:15px/1.55 ui-sans-serif,-apple-system,"SF Pro Text",Segoe UI,sans-serif; }}
+.wrap {{ max-width:920px; margin:0 auto; }}
+h1 {{ font-size:1.5rem; margin:0 0 .25rem; letter-spacing:-.02em; }}
+.sub {{ color:var(--dim); font-size:.85rem; margin:0 0 2rem; }}
+.cards {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:.75rem; margin-bottom:2rem; }}
+.card {{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:1rem 1.1rem; }}
+.card b {{ display:block; font-size:1.9rem; font-weight:650; letter-spacing:-.03em; line-height:1.1; }}
+.card span {{ color:var(--dim); font-size:.78rem; text-transform:uppercase; letter-spacing:.06em; }}
+section {{ background:var(--card); border:1px solid var(--line); border-radius:12px;
+  padding:1.25rem 1.35rem; margin-bottom:1rem; }}
+h2 {{ font-size:.78rem; text-transform:uppercase; letter-spacing:.07em; color:var(--dim);
+  margin:0 0 1rem; font-weight:600; }}
+.scroll {{ overflow-x:auto; padding-bottom:.35rem; }}
+.heat {{ display:flex; gap:3px; min-width:min-content; }}
+.wk {{ display:flex; flex-direction:column; gap:3px; }}
+.d {{ width:12px; height:12px; border-radius:3px; background:var(--a0); display:block; }}
+.d.pad {{ background:transparent; }}
+.l1 {{ background:var(--a1); }} .l2 {{ background:var(--a2); }}
+.l3 {{ background:var(--a3); }} .l4 {{ background:var(--a4); }}
+.months {{ display:flex; gap:3px; min-width:min-content; margin-bottom:5px; }}
+.mo {{ width:12px; font-size:.62rem; color:var(--dim); white-space:nowrap; }}
+.legend {{ display:flex; align-items:center; gap:5px; justify-content:flex-end;
+  margin-top:.75rem; color:var(--dim); font-size:.72rem; }}
+.row {{ display:grid; grid-template-columns:minmax(90px,1fr) 3fr auto; gap:.75rem;
+  align-items:center; margin-bottom:.45rem; font-size:.87rem; }}
+.k {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+.track {{ background:var(--a0); border-radius:99px; height:8px; overflow:hidden; }}
+.fill {{ display:block; height:100%; background:var(--a3); border-radius:99px; }}
+.v {{ color:var(--dim); font-size:.8rem; white-space:nowrap; }}
+ul.today {{ list-style:none; margin:0; padding:0; }}
+ul.today li {{ display:grid; grid-template-columns:auto 1fr auto; gap:.85rem;
+  padding:.5rem 0; border-bottom:1px solid var(--line); font-size:.9rem; }}
+ul.today li:last-child {{ border-bottom:0; }}
+.t {{ font-variant-numeric:tabular-nums; color:var(--dim); }}
+.m {{ color:var(--dim); font-size:.8rem; }}
+.empty {{ color:var(--dim); font-size:.87rem; margin:0; }}
+footer {{ color:var(--dim); font-size:.75rem; text-align:center; margin-top:2rem; }}
+</style></head><body><div class="wrap">
+
+<h1>GTG history</h1>
+<p class="sub">grease the groove · updated {stamp}</p>
+
+<div class="cards">
+  <div class="card"><b>{total_sets}</b><span>sets</span></div>
+  <div class="card"><b>{total_reps}</b><span>reps</span></div>
+  <div class="card"><b>{cur_streak}</b><span>day streak</span></div>
+  <div class="card"><b>{best_streak}</b><span>best streak</span></div>
+  <div class="card"><b>{active}</b><span>active days</span></div>
+</div>
+
+<section>
+  <h2>Last {weeks} weeks</h2>
+  <div class="scroll">
+    <div class="months">{month_row}</div>
+    <div class="heat">{heat}</div>
+  </div>
+  <div class="legend">less
+    <i class="d l0"></i><i class="d l1"></i><i class="d l2"></i><i class="d l3"></i><i class="d l4"></i>
+  more</div>
+</section>
+
+<section><h2>Today</h2>{today}</section>
+<section><h2>By exercise</h2>{ex_bars}</section>
+<section><h2>By hour of day</h2>{hour_bars}</section>
+<section><h2>Home vs away</h2>{where_bars}</section>
+
+<footer>generated by <code>gtg page</code> from ~/.local/state/gtg/log.tsv</footer>
+</div></body></html>
+"""
+
+if __name__ == "__main__":
+    main()
