@@ -25,6 +25,8 @@ gtg options    list today's choices
 gtg skip       record a miss
 gtg today      today's tally
 gtg week       the last 7 days, one bar per day
+gtg history    the last 30 days (gtg history 90 for more)
+gtg stats      totals by exercise, all time
 gtg plan       print the current plan
 gtg edit       open the plan in $EDITOR
 ```
@@ -125,6 +127,21 @@ Empty output on a day you know has meetings means the sync is still off.
 All-day events are excluded (`-ea`) and that matters more than it looks: one
 "PTO" entry, a birthday, or a subscribed holiday calendar would otherwise read
 as an all-day meeting and silently mute the whole day.
+
+### Not every calendar entry is a meeting
+
+A calendar used for life structure rather than scheduling is a wall of blocks
+that are not commitments: `Sleep`, `Dinner`, `Morning Duties`, `Be in Bed`,
+and time-tracking calendars that log where the day went. Honored literally,
+those mute most of the day. Two knobs, both in `plan.txt`:
+
+- `IGNORE_CALENDARS` drops whole calendars (time-tracking ones belong here).
+- `IGNORE_TITLES` is a case-insensitive regex for routine blocks that live on a
+  calendar you otherwise want honored.
+
+What survives both filters is a real commitment, and only that suppresses a
+nudge. `nudge.log` names the event that caused each skip, so an over-broad
+filter is visible rather than mysterious.
 
 ## It fails open, on purpose
 

@@ -71,9 +71,13 @@ today_line() {
   printf '%s' "$line"
 }
 
-# Trailing "x12" in a plan line is the prescribed rep count, if present.
+# The rep count in a line, if there is one. Two shapes, because the plan writes
+# one way ("pull-ups x5") and people type the other ("5 ring dips").
 reps_from_line() {
-  printf '%s' "$1" | sed -n 's/.*[[:space:]]x\([0-9]\{1,\}\).*/\1/p'
+  local s="$1" n
+  n=$(printf '%s' "$s" | sed -n 's/.*[[:space:]]x\([0-9]\{1,\}\).*/\1/p')
+  [ -n "$n" ] || n=$(printf '%s' "$s" | sed -n 's/^\([0-9]\{1,\}\)[[:space:]].*/\1/p')
+  printf '%s' "$n"
 }
 
 # One row: iso8601 <TAB> exercise <TAB> reps <TAB> home|away

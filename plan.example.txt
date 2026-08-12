@@ -20,21 +20,29 @@ SOUND=Ping
 # SPEAK=yes reads the exercise aloud. Genuinely hard to ignore.
 SPEAK=
 
-# Which calendars count as "busy". Empty = all of them, which is the right
-# default: all-day events are already excluded, so birthdays and subscribed
-# holidays cannot mute your day. Narrow it only if some calendar you do not
-# control starts suppressing nudges, e.g. BUSY_CALENDARS=Work,Home
+# Which calendars count as "busy". Empty = all of them. All-day events are
+# always excluded, so birthdays and subscribed holidays cannot mute your day.
 BUSY_CALENDARS=
+
+# Calendars to ignore entirely. Time-tracking and life-structure calendars go
+# here: they are wall-to-wall blocks that are not meetings, and left in they
+# suppress most of the day.
+IGNORE_CALENDARS=Time Tracking,GTG
+
+# Event titles that are routine self-blocks rather than commitments, as a
+# case-insensitive regex. Same reasoning as above, but for blocks that live on
+# a calendar you otherwise want honored.
+IGNORE_TITLES=sleep|be in bed|morning duties|dinner|lunch|evening help|time block|focus
 
 # One line per weekday. Separate several choices with "|" and the picker offers
 # all of them, first one preselected. A trailing "xN" is read as the rep count.
-mon: pull-ups x5 | push-ups x20 | dead hang 30s
-tue: push-ups x20 | air squats x20 | calf raises x25
-wed: farmer walk 1 min | pull-ups x5 | push-ups x20
-thu: pull-ups x5 | push-ups x20 | dead hang 30s
-fri: push-ups x20 | air squats x20 | farmer walk 1 min
-sat: dead hang 30s | pull-ups x5 | 5 min walk
-sun: 10 min walk | mobility 5 min | rest
+mon: ring dips x8 | pull-ups x5 | push-ups x20
+tue: ring crunches x12 | ring rows x8 | air squats x20
+wed: ring dips x8 | farmer walk 1 min | push-ups x20
+thu: pull-ups x5 | ring crunches x12 | dead hang 30s
+fri: ring rows x8 | push-ups x20 | air squats x20
+sat: ring dips x8 | dead hang 30s | 5 min walk
+sun: 10 min walk | ring crunches x12 | mobility 5 min
 
 # Used whenever you are not on the home network, and as the fallback if a
 # weekday line above is missing.

@@ -13,6 +13,8 @@ gtg options    list today's choices
 gtg skip       record a miss
 gtg today      today's tally
 gtg week       the last 7 days, one line per day
+gtg history    the last 30 days (gtg history 90 for more)
+gtg stats      totals by exercise, all time
 gtg plan       print the current plan
 gtg edit       open plan.txt in $EDITOR
 EOF
@@ -68,6 +70,52 @@ case "${1:-done}" in
         }
       }' "$STATE_DIR/.week" "$LOG"
     rm -f "$STATE_DIR/.week"
+    ;;
+
+  history)
+    days=${2:-30}
+    if [ ! -s "$LOG" ]; then echo "nothing logged yet"; exit 0; fi
+    i=$(( days - 1 ))
+    while [ "$i" -ge 0 ]; do date -v-"${i}"d '+%Y-%m-%d'; i=$(( i - 1 )); done >"$STATE_DIR/.range"
+    awk -F'\t' '
+      NR == FNR { order[++k] = $1; seen[$1] = 0; next }
+      { d = substr($1, 1, 10)
+        if (d in seen) { if ($3 == "skip") sk[d]++; else seen[d]++ } }
+      END {
+        total = 0; active = 0
+        for (i = 1; i <= k; i++) {
+          d = order[i]; n = seen[d]
+          total += n; if (n > 0) active++
+          bar = ""
+          for (j = 0; j < n; j++) bar = bar "#"
+          printf "%s  %-20s %s%s\n", d, bar, (n ? n : "."), \
+                 (d in sk ? "  (" sk[d] " skipped)" : "")
+        }
+        printf "\n%d sets over %d days, %d day(s) active (%d%%)\n", \
+               total, k, active, (k ? active * 100 / k : 0)
+      }' "$STATE_DIR/.range" "$LOG"
+    rm -f "$STATE_DIR/.range"
+    ;;
+
+  stats)
+    if [ ! -s "$LOG" ]; then echo "nothing logged yet"; exit 0; fi
+    awk -F'\t' '
+      $3 != "skip" { c[$2]++; if ($3 ~ /^[0-9]+$/) r[$2] += $3 }
+      $3 == "skip" { s[$2]++ }
+      END {
+        for (e in c) printf "%6d|%s\n", c[e], e
+        for (e in s) if (!(e in c)) printf "%6d|%s\n", 0, e
+      }' "$LOG" | sort -rn | while IFS='|' read -r n e; do
+        reps=$(awk -F'\t' -v e="$e" '$2==e && $3 ~ /^[0-9]+$/ {t+=$3} END{print t+0}' "$LOG")
+        if [ "$reps" -gt 0 ]; then
+          printf "  %-30s %3d sets  %5d reps\n" "$e" "$n" "$reps"
+        else
+          printf "  %-30s %3d sets\n" "$e" "$n"
+        fi
+      done
+    echo
+    awk -F'\t' 'END{print "  " NR " entries since " }' "$LOG" | tr -d '\n'
+    head -1 "$LOG" | cut -c1-10
     ;;
 
   done)

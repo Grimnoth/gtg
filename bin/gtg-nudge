@@ -44,14 +44,28 @@ starts_soon=no
 ical=$(command -v icalBuddy 2>/dev/null || true)
 if [ -n "$ical" ]; then
   args=(-nc -nrd -ea -b "" -eep "notes,location,url,attendees,datetime")
-  busy_cals=$(cfg BUSY_CALENDARS)
-  if [ -n "$busy_cals" ]; then args+=(-ic "$busy_cals"); fi
+  inc=$(cfg BUSY_CALENDARS)
+  exc=$(cfg IGNORE_CALENDARS)
+  [ -n "$inc" ] && args+=(-ic "$inc")
+  [ -n "$exc" ] && args+=(-ec "$exc")
 
-  if out=$("$ical" "${args[@]}" eventsNow 2>/dev/null) && [ -n "$out" ]; then
+  # Drop routine self-blocks by title. A calendar used for life structure
+  # rather than meetings -- Sleep, Dinner, Morning Duties, Be in Bed -- would
+  # otherwise read as an unbroken wall of meetings and mute most of the day.
+  # With -b "" and datetime excluded, each line is just a title, so this is a
+  # clean match.
+  ignore_re=$(cfg IGNORE_TITLES)
+  drop_routine() {
+    if [ -n "$ignore_re" ]; then grep -viE "$ignore_re"; else cat; fi
+  }
+
+  out=$("$ical" "${args[@]}" eventsNow 2>/dev/null | drop_routine | grep -v '^[[:space:]]*$' || true)
+  if [ -n "$out" ]; then
     busy_now=yes
-  elif out=$("$ical" "${args[@]}" eventsFrom:now to:"+$SOON_MINS minutes" 2>/dev/null) \
-       && [ -n "$out" ]; then
-    starts_soon=yes
+  else
+    out=$("$ical" "${args[@]}" eventsFrom:now to:"+$SOON_MINS minutes" 2>/dev/null \
+          | drop_routine | grep -v '^[[:space:]]*$' || true)
+    [ -n "$out" ] && starts_soon=yes
   fi
 fi
 
@@ -59,7 +73,7 @@ if [ "$busy_now" = yes ]; then
   # Deliberately does NOT stamp. Leaving the slot unburned means the next fire,
   # 30 minutes later, catches Ben the moment the meeting ends rather than
   # idling for a full hour.
-  note "skip: in a meeting"
+  note "skip: in a meeting ($(printf '%s' "$out" | head -1))"
   exit 0
 fi
 
