@@ -47,28 +47,37 @@ where_am_i() {
   fi
 }
 
-# The day's options, one per line. A plan line may offer several separated by
-# "|"; the first is the default selection.
+# One plan line by key, options still "|" separated.
+plan_line() { sed -n "s/^$1:[[:space:]]*//p" "$PLAN" 2>/dev/null | head -1; }
+
+# The options on offer right now, one per line.
+#
+# "every:" is the core pool and is offered every single day. A weekday line only
+# ADDS to it. Grease-the-groove is one or two movements hit often, not a weekly
+# split, so gating a movement behind its assigned day is exactly backwards --
+# it hides the thing you are trying to accumulate volume in.
 today_options() {
-  today_line "$1" \
+  local where="$1" dow
+  dow=$(date +%a | tr '[:upper:]' '[:lower:]')
+  {
+    if [ "$where" = home ]; then
+      plan_line every
+      plan_line "$dow"
+    else
+      plan_line away
+    fi
+  } \
     | tr '|' '\n' \
     | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-    | grep -v '^$'
+    | grep -v '^$' \
+    | awk '!seen[$0]++'
 }
 
 # Just the first option, for logging and for one-line summaries.
-primary_option() { today_options "$1" | head -1; }
-
-# The raw plan line for right now, given home|away.
-today_line() {
-  local where="$1" dow line
-  dow=$(date +%a | tr '[:upper:]' '[:lower:]')
-  if [ "$where" = home ]; then
-    line=$(sed -n "s/^$dow:[[:space:]]*//p" "$PLAN" 2>/dev/null | head -1)
-  fi
-  [ -n "${line:-}" ] || line=$(sed -n "s/^away:[[:space:]]*//p" "$PLAN" 2>/dev/null | head -1)
-  [ -n "${line:-}" ] || line="do a quick set"
-  printf '%s' "$line"
+primary_option() {
+  local first
+  first=$(today_options "$1" | head -1)
+  printf '%s' "${first:-do a quick set}"
 }
 
 # The rep count in a line, if there is one. Two shapes, because the plan writes

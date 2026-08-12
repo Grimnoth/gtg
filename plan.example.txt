@@ -34,16 +34,24 @@ IGNORE_CALENDARS=Time Tracking,GTG
 # a calendar you otherwise want honored.
 IGNORE_TITLES=sleep|be in bed|morning duties|dinner|lunch|evening help|time block|focus
 
-# One line per weekday. Separate several choices with "|" and the picker offers
-# all of them, first one preselected. A trailing "xN" is read as the rep count.
-mon: ring dips x8 | pull-ups x5 | push-ups x20
-tue: ring crunches x12 | ring rows x8 | air squats x20
-wed: ring dips x8 | farmer walk 1 min | push-ups x20
-thu: pull-ups x5 | ring crunches x12 | dead hang 30s
-fri: ring rows x8 | push-ups x20 | air squats x20
-sat: ring dips x8 | dead hang 30s | 5 min walk
-sun: 10 min walk | ring crunches x12 | mobility 5 min
+# THE CORE POOL. Offered every single day, in this order, first preselected.
+# Separate choices with "|". A trailing "xN" is read as the rep count.
+#
+# Keep this short. Grease-the-groove works by hitting the same few movements
+# often and well short of failure, so a long menu defeats the point.
+every: ring dips x5 | pull-ups x5 | push-ups x20 | ring crunches x12
+
+# Optional per-weekday EXTRAS, appended to the pool above rather than replacing
+# it. Leave them blank for the same choices all week. Duplicates are collapsed.
+mon:
+tue:
+wed: farmer walk 1 min
+thu:
+fri:
+sat: dead hang 30s
+sun: 10 min walk | mobility 5 min
 
 # Used whenever you are not on the home network, and as the fallback if a
 # weekday line above is missing.
-away: 2 min walk | 20 calf raises | 20 air squats | stairs, 2 flights
+# Replaces the pool entirely when you are off the home network.
+away: 2 min walk | air squats x20 | calf raises x25 | stairs, 2 flights
