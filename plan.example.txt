@@ -1,0 +1,30 @@
+# Copied to ~/.config/gtg/plan.txt on first install, then never touched again.
+# Edit that copy, not this one. No reload needed -- every nudge re-reads it.
+
+WAKE_START=9
+WAKE_END=20
+
+# banner = passive notification (default).
+# alert  = modal with Did it / Skip / Snooze buttons; steals focus, but one
+#          click logs the set on your way back to the desk.
+STYLE=banner
+
+# Which calendars count as "busy". Empty = all of them, which is the right
+# default: all-day events are already excluded, so birthdays and subscribed
+# holidays cannot mute your day. Narrow it only if some calendar you do not
+# control starts suppressing nudges, e.g. BUSY_CALENDARS=Work,Home
+BUSY_CALENDARS=
+
+# One line per weekday. A trailing "xN" is read as the prescribed rep count,
+# so `gtg` with no argument logs that number.
+mon: pull-ups x5
+tue: push-ups x20
+wed: farmer walk, 1 min heavy
+thu: pull-ups x5
+fri: push-ups x20
+sat: dead hang, 30s
+sun: rest day, just walk
+
+# Used whenever you are not on the home network, and as the fallback if a
+# weekday line above is missing.
+away: stand up, 2 min walk, 20 calf raises

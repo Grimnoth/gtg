@@ -1,0 +1,84 @@
+#!/bin/bash
+# gtg -- log a grease-the-groove set. See `gtg help`.
+set -u
+
+. "$(dirname "$0")/gtg-lib.sh"
+
+usage() {
+  cat <<'EOF'
+gtg            log today's prescribed set as done
+gtg 12         log 12 reps of today's exercise
+gtg skip       record a miss
+gtg today      today's tally
+gtg week       the last 7 days, one line per day
+gtg plan       print the current plan
+gtg edit       open plan.txt in $EDITOR
+EOF
+}
+
+where=$(where_am_i)
+line=$(today_line "$where")
+
+case "${1:-done}" in
+  help|-h|--help) usage ;;
+
+  plan) cat "$PLAN" ;;
+
+  edit) "${EDITOR:-vi}" "$PLAN" ;;
+
+  skip)
+    record "$line" "skip" "$where"
+    echo "skipped: $line"
+    ;;
+
+  today)
+    today=$(date '+%Y-%m-%d')
+    if [ ! -s "$LOG" ]; then echo "nothing logged yet"; exit 0; fi
+    awk -F'\t' -v d="$today" '
+      index($1, d) == 1 {
+        n++
+        if ($3 ~ /^[0-9]+$/) reps += $3
+        printf "  %s  %s%s\n", substr($1, 12, 5), $2, ($3 == "skip" ? "  (skipped)" : "")
+      }
+      END {
+        if (n == 0) print "  nothing yet today"
+        else printf "\n%d set(s)%s today\n", n, (reps ? ", " reps " reps" : "")
+      }' "$LOG"
+    ;;
+
+  week)
+    if [ ! -s "$LOG" ]; then echo "nothing logged yet"; exit 0; fi
+    # Seed the last 7 dates so days with zero sets still print. Silent gaps are
+    # the whole point of looking.
+    for i in 6 5 4 3 2 1 0; do date -v-"${i}"d '+%Y-%m-%d'; done >"$STATE_DIR/.week"
+    awk -F'\t' '
+      NR == FNR { order[++k] = $1; seen[$1] = 0; next }
+      { d = substr($1, 1, 10); if (d in seen) { seen[d]++; if ($3 == "skip") sk[d]++ } }
+      END {
+        for (i = 1; i <= k; i++) {
+          d = order[i]
+          done_n = seen[d] - (d in sk ? sk[d] : 0)
+          bar = ""
+          for (j = 0; j < done_n; j++) bar = bar "#"
+          printf "%s  %-14s %d\n", d, bar, done_n
+        }
+      }' "$STATE_DIR/.week" "$LOG"
+    rm -f "$STATE_DIR/.week"
+    ;;
+
+  done)
+    record "$line" "$(reps_from_line "$line")" "$where"
+    echo "logged: $line  [$where]"
+    ;;
+
+  *)
+    if printf '%s' "$1" | grep -qE '^[0-9]+$'; then
+      record "$line" "$1" "$where"
+      echo "logged: $line -> $1 reps  [$where]"
+    else
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 2
+    fi
+    ;;
+esac

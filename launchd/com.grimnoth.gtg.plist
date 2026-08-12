@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.grimnoth.gtg</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/src/personal/gtg/bin/gtg-nudge</string>
+  </array>
+
+  <!-- Each dict omits every field but Minute, and launchd treats omitted fields
+       as wildcards, so these mean "every hour at :50" and "every hour at :20".
+       :50 is the primary slot; it lands just before top-of-hour meetings.
+       :20 is the meeting recovery path -- the 40 minute debounce in gtg-nudge
+       swallows it during a free hour, but when a meeting eats the :20 and :50
+       slots it catches the first free moment afterwards. -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Minute</key><integer>50</integer></dict>
+    <dict><key>Minute</key><integer>20</integer></dict>
+  </array>
+
+  <!-- No RunAtLoad: it would fire a banner at every login, and the debounce
+       would then suppress the real nudge. -->
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.local/state/gtg/nudge.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.local/state/gtg/nudge.log</string>
+</dict>
+</plist>

@@ -1,0 +1,103 @@
+#!/bin/bash
+# gtg-nudge -- grease-the-groove reminder. Run by launchd at :20 and :50 past the hour.
+# Exits 0 quietly whenever it should not interrupt. See README.md for the full rules.
+set -u
+
+. "$(dirname "$0")/gtg-lib.sh"
+
+# 40 min. launchd replays every slot missed while the Mac slept, all at once, so
+# without this a laptop opened after lunch emits a burst of banners.
+DEBOUNCE_SECS=2400
+# How far ahead a meeting still counts as "starting soon".
+SOON_MINS=12
+
+note() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M')" "$*"; }
+
+[ -r "$PLAN" ] || { note "FATAL: no plan file at $PLAN"; exit 1; }
+
+now=$(date +%s)
+
+# --- 1. debounce ------------------------------------------------------------
+last=$(cat "$STAMP" 2>/dev/null || echo 0)
+case "$last" in ''|*[!0-9]*) last=0 ;; esac
+if [ $(( now - last )) -lt "$DEBOUNCE_SECS" ]; then exit 0; fi
+
+# --- 2. waking window -------------------------------------------------------
+wake_start=$(cfg WAKE_START); wake_start=${wake_start:-9}
+wake_end=$(cfg WAKE_END);     wake_end=${wake_end:-20}
+hour=$(date +%-H)
+if [ "$hour" -lt "$wake_start" ] || [ "$hour" -gt "$wake_end" ]; then exit 0; fi
+
+# --- 3. home vs away --------------------------------------------------------
+where=$(where_am_i)
+
+# --- 4. meeting check -------------------------------------------------------
+# FAILS OPEN on purpose: a missing icalBuddy, a refused calendar grant, a bad
+# calendar name, or any error at all still nudges. A stray banner during a
+# meeting is a much cheaper failure than a reminder system that quietly stops.
+#
+# -ea excludes all-day events. That matters more than it looks: a single "PTO"
+# entry, a birthday, or a subscribed holiday would otherwise read as an
+# all-day meeting and silently mute the entire day.
+busy_now=no
+starts_soon=no
+ical=$(command -v icalBuddy 2>/dev/null || true)
+if [ -n "$ical" ]; then
+  args=(-nc -nrd -ea -b "" -eep "notes,location,url,attendees,datetime")
+  busy_cals=$(cfg BUSY_CALENDARS)
+  if [ -n "$busy_cals" ]; then args+=(-ic "$busy_cals"); fi
+
+  if out=$("$ical" "${args[@]}" eventsNow 2>/dev/null) && [ -n "$out" ]; then
+    busy_now=yes
+  elif out=$("$ical" "${args[@]}" eventsFrom:now to:"+$SOON_MINS minutes" 2>/dev/null) \
+       && [ -n "$out" ]; then
+    starts_soon=yes
+  fi
+fi
+
+if [ "$busy_now" = yes ]; then
+  # Deliberately does NOT stamp. Leaving the slot unburned means the next fire,
+  # 30 minutes later, catches Ben the moment the meeting ends rather than
+  # idling for a full hour.
+  note "skip: in a meeting"
+  exit 0
+fi
+
+# --- 5. what to do ----------------------------------------------------------
+line=$(today_line "$where")
+if [ "$starts_soon" = yes ]; then
+  title="GTG - meeting soon"
+  body="$line. Squeeze it in now."
+elif [ "$where" = away ]; then
+  title="GTG - out"
+  body="$line"
+else
+  title="GTG"
+  body="$line"
+fi
+
+# --- 6. notify --------------------------------------------------------------
+style=$(cfg STYLE); style=${style:-banner}
+
+if [ "$style" = alert ]; then
+  # Modal. Steals focus, but it waits on screen while you walk off and do the
+  # set, so one click on the way back logs it.
+  answer=$(/usr/bin/osascript \
+    -e "display alert \"$(esc "$title")\" message \"$(esc "$body")\" \
+        buttons {\"Skip\", \"Snooze\", \"Did it\"} default button \"Did it\" \
+        giving up after 900" \
+    -e 'try' -e 'button returned of result' -e 'end try' 2>/dev/null || true)
+  case "$answer" in
+    "Did it") record "$line" "$(reps_from_line "$line")" "$where"; note "logged: did it" ;;
+    "Skip")   record "$line" "skip" "$where"; note "logged: skip" ;;
+    "Snooze") note "snoozed"; exit 0 ;;   # unstamped, so the next slot retries
+    *)        note "no answer (timed out)"; exit 0 ;;
+  esac
+else
+  /usr/bin/osascript -e "display notification \"$(esc "$body")\" \
+     with title \"$(esc "$title")\" sound name \"Ping\"" 2>/dev/null || true
+fi
+
+# --- 7. stamp ---------------------------------------------------------------
+printf '%s' "$now" >"$STAMP"
+note "nudged ($where): $line"
