@@ -128,45 +128,35 @@ fi
 # whatever is being looked at, instead of behind everything as a background
 # process's window would.
 
-# Run an AppleScript under a hard ceiling and echo its output. `choose from
-# list` has no `giving up after` of its own, so the timeout is enforced here.
-osa() {
-  local out pid waited=0
-  out=$(mktemp)
-  /usr/bin/osascript >"$out" 2>/dev/null <<<"$1" &
-  pid=$!
-  while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge "$DIALOG_TIMEOUT" ]; then kill "$pid" 2>/dev/null; break; fi
-    sleep 5
-    waited=$(( waited + 5 ))
-  done
-  cat "$out"
-  rm -f "$out"
+# Plain runner. Nothing here ever kills a dialog, and that is the entire point.
+#
+# The previous version enforced its own timeout by killing osascript. But the
+# dialog is displayed BY the target application, not by osascript, so killing
+# osascript left a live window on screen that nothing would ever collect. The
+# script then exited, released the lock, and the next nudge opened another on
+# top of it. That is how three stacked up.
+#
+# Every dialog below now carries its own `giving up after`, so macOS dismisses
+# them and there is nothing left to reap.
+osa() { /usr/bin/osascript 2>/dev/null <<<"$1" || true; }
+
+# One recommendation and one button, rather than a menu to weigh. The rotation
+# already put the right movement on top, so the default answer is nearly always
+# correct; alternatives are named in the message and reachable via Other...
+#
+# Three buttons is also the hard limit of `display alert` -- and unlike
+# `choose from list`, it supports `giving up after`, which is what makes the
+# orphaned-dialog bug above structurally impossible.
+alert_for() {
+  printf 'tell application %s\n  activate\n  set r to display alert "%s" message "%s" buttons {"Snooze", "Other...", "Did it"} default button "Did it" giving up after %s\n  if gave up of r then\n    return "__TIMEOUT__"\n  else\n    return button returned of r\n  end if\nend tell\n' \
+    "$1" "$(esc "$title")" "$(esc "$2")" "$DIALOG_TIMEOUT"
 }
 
-# Newline-separated stdin -> {"a", "b"} for AppleScript.
-as_list() {
-  local out="{" first=1 o
-  while IFS= read -r o; do
-    [ -z "$o" ] && continue
-    [ "$first" -eq 1 ] || out="$out, "
-    out="$out\"$(esc "$o")\""
-    first=0
-  done
-  printf '%s}' "$out"
-}
-
-OTHER="Other..."
-SKIP="Skip this one"
-
-picker_for() {
-  printf 'tell application %s\n  activate\n  set r to choose from list %s with title "%s" with prompt "%s" default items %s OK button name "Log it" cancel button name "Snooze"\n  if r is false then\n    return "__SNOOZE__"\n  else\n    return item 1 of r\n  end if\nend tell\n' \
-    "$1" "$2" "$(esc "$title")" "$(esc "$prompt")" "$3"
-}
-
+# Prefilled with the suggestion, so "same movement, different count" is one
+# edit. `display dialog` also carries its own timeout.
 other_for() {
-  printf 'tell application %s\n  activate\n  set r to display dialog "What did you do instead?" default answer "" with title "%s" buttons {"Cancel", "Log it"} default button "Log it" giving up after 300\n  if button returned of r is "Cancel" then\n    return "__CANCEL__"\n  else\n    return text returned of r\n  end if\nend tell\n' \
-    "$1" "$(esc "$title")"
+  printf 'tell application %s\n  activate\n  set r to display dialog "What did you do?" default answer "%s" with title "%s" buttons {"Cancel", "Log it"} default button "Log it" giving up after 300\n  if button returned of r is "Cancel" then\n    return "__CANCEL__"\n  else\n    return text returned of r\n  end if\nend tell\n' \
+    "$1" "$(esc "$2")" "$(esc "$title")"
 }
 
 if [ "$style" = banner ]; then
@@ -175,22 +165,29 @@ if [ "$style" = banner ]; then
   /usr/bin/osascript -e "display notification \"$(esc "$line")\" \
      with title \"$(esc "$title")\" sound name \"Ping\"" 2>/dev/null || true
 else
-  opts=$( { today_options "$where"; printf '%s\n%s\n' "$OTHER" "$SKIP"; } | as_list )
-  dflt="{\"$(esc "$line")\"}"
+  # Name the next couple of alternatives in the message, so what else is due
+  # stays visible without turning the nudge back into a menu.
+  hint=$(today_options "$where" | sed -n '2,3p' \
+         | awk 'NR > 1 { printf " / " } { printf "%s", $0 } END { if (NR) print "" }')
+  msg="$line"
+  if [ -n "$hint" ]; then
+    msg="$line
 
-  choice=$(osa "$(picker_for '(path to frontmost application as text)' "$opts" "$dflt")")
-  if [ -z "$choice" ]; then
-    # Nothing scriptable was frontmost; re-address it to System Events.
-    choice=$(osa "$(picker_for '"System Events"' "$opts" "$dflt")")
+or: $hint"
   fi
 
-  case "$choice" in
-    "")            note "no answer (timed out)"; exit 0 ;;   # unstamped, retries
-    "__SNOOZE__")  note "snoozed"; exit 0 ;;                 # unstamped, retries
-    "$SKIP")       record "$line" "skip" "$where"; note "logged: skip" ;;
-    "$OTHER")
-      typed=$(osa "$(other_for '(path to frontmost application as text)')")
-      [ -n "$typed" ] || typed=$(osa "$(other_for '"System Events"')")
+  answer=$(osa "$(alert_for '(path to frontmost application as text)' "$msg")")
+  if [ -z "$answer" ]; then
+    # Nothing scriptable was frontmost; re-address it to System Events.
+    answer=$(osa "$(alert_for '"System Events"' "$msg")")
+  fi
+
+  case "$answer" in
+    ""|"__TIMEOUT__") note "no answer (timed out)"; exit 0 ;;  # unstamped, retries
+    "Snooze")         note "snoozed"; exit 0 ;;                # unstamped, retries
+    "Other...")
+      typed=$(osa "$(other_for '(path to frontmost application as text)' "$line")")
+      [ -n "$typed" ] || typed=$(osa "$(other_for '"System Events"' "$line")")
       case "$typed" in
         ""|"__CANCEL__") note "other: cancelled"; exit 0 ;;
       esac
@@ -198,8 +195,7 @@ else
       record "$line" "$(reps_from_line "$line")" "$where"
       note "logged (typed): $line"
       ;;
-    *)
-      line="$choice"
+    *)  # "Did it"
       record "$line" "$(reps_from_line "$line")" "$where"
       note "logged: $line"
       ;;

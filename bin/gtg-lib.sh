@@ -120,18 +120,31 @@ primary_option() {
   printf '%s' "${first:-do a quick set}"
 }
 
-# The rep count in a line, if there is one. Two shapes, because the plan writes
-# one way ("pull-ups x5") and people type the other ("5 ring dips").
+# The rep count in a line, wherever it sits. Free text arrives in every shape:
+# "pull-ups x5", "5 ring dips", "ring dips 5".
 reps_from_line() {
   local s="$1" n
+  # 1. An explicit "xN" is unambiguous, so it wins outright.
   n=$(printf '%s' "$s" | sed -n 's/.*[[:space:]]x\([0-9]\{1,\}\).*/\1/p')
-  [ -n "$n" ] || n=$(printf '%s' "$s" | sed -n 's/^\([0-9]\{1,\}\)[[:space:]].*/\1/p')
+  # 2. A bare number at the end: "ring dips 12".
+  [ -n "$n" ] || n=$(printf '%s' "$s" | sed -n 's/.*[^0-9]\([0-9]\{1,\}\)[[:space:]]*$/\1/p')
+  # 3. A leading number: "12 ring dips" -- but not when it introduces a
+  #    duration ("2 min walk", "30 sec hang"), which is a time, not a count.
+  if [ -z "$n" ] \
+     && ! printf '%s' "$s" | grep -qiE '^[0-9]+[[:space:]]*(m|s|min|sec|minute|second)'; then
+    n=$(printf '%s' "$s" | sed -n 's/^\([0-9]\{1,\}\)[[:space:]].*/\1/p')
+  fi
   printf '%s' "$n"
 }
 
 # One row: iso8601 <TAB> exercise <TAB> reps <TAB> home|away
+#
+# The timestamp is the moment you answer, not the moment the nudge fired, so
+# the log reflects when the set actually happened.
 record() {
   printf '%s\t%s\t%s\t%s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$1" "$2" "$3" >>"$LOG"
+  # Refresh the history page so an already-open tab only needs a reload.
+  "$(dirname "$0")/gtg-page" --no-open >/dev/null 2>&1 || true
 }
 
 # Escape for embedding in an AppleScript double-quoted string.
