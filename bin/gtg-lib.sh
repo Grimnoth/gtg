@@ -70,7 +70,47 @@ today_options() {
     | tr '|' '\n' \
     | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
     | grep -v '^$' \
-    | awk '!seen[$0]++'
+    | awk '!seen[$0]++' \
+    | rotate_options
+}
+
+# Reorder the pool so the movement you have neglected longest comes first.
+#
+# Rotation is derived from the log, not from a fixed schedule: fewest sets
+# TODAY wins, ties broken by whichever went longest since it was last done,
+# and anything never done at all sorts to the front. The effect is that the
+# preselected item is nearly always the right answer, so a nudge stays one
+# click rather than a menu to deliberate over.
+#
+# Matching is on the movement name with the count stripped, so "ring dips x5"
+# in the plan still matches "5 ring dips" typed into Other..., and editing a
+# rep count does not make a movement look untouched.
+rotate_options() {
+  if [ ! -s "$LOG" ]; then cat; return; fi
+  awk -F'\t' -v today="$(date '+%Y-%m-%d')" '
+    function key(s) {
+      s = tolower(s)
+      sub(/[ \t]*x[0-9]+[ \t]*$/, "", s)
+      sub(/^[0-9]+[ \t]+/, "", s)
+      gsub(/[ \t]+/, " ", s)
+      sub(/^ /, "", s); sub(/ $/, "", s)
+      return s
+    }
+    FNR == NR {
+      if ($3 != "skip" && $2 != "") {
+        k = key($2)
+        if ($1 > last[k]) last[k] = $1
+        if (substr($1, 1, 10) == today) n[k]++
+      }
+      next
+    }
+    {
+      k = key($0)
+      printf "%d\t%s\t%03d\t%s\n", (k in n ? n[k] : 0), (k in last ? last[k] : "0"), FNR, $0
+    }
+  ' "$LOG" - \
+    | sort -t"$(printf '\t')" -k1,1n -k2,2 -k3,3n \
+    | cut -f4
 }
 
 # Just the first option, for logging and for one-line summaries.

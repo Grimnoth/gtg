@@ -46,11 +46,37 @@ A modal picker listing the day's options, first one preselected, plus
 - **Snooze**, or letting it time out after 15 minutes, deliberately leaves the
   slot unconsumed, so the next fire retries rather than skipping the hour.
 
-Offer several choices for a day by separating them with `|`:
+## The order rotates itself
+
+The list is not fixed. It reorders on every nudge so the movement you have
+neglected longest sits on top, already selected:
+
+1. Fewest sets **today** wins, so nothing gets hammered while something else
+   goes untouched.
+2. Ties break by whichever went longest since it was last done.
+3. Anything never done sorts to the front.
+
+So a set of pull-ups pushes pull-ups to the back, and the pool round-robins
+without a schedule. The point is that the preselected item is nearly always
+the right answer, which keeps a nudge at one click instead of a menu to
+deliberate over. Every other option is still right there when you want it.
+
+Matching ignores the rep count, so `ring dips x5` in the plan and `5 ring
+dips` typed into **Other...** are the same movement. Free-text entries feed
+the rotation, and changing a rep count does not make a movement look untouched.
+
+## The plan file
+
+`every:` is the core pool, offered daily. Weekday lines only add extras on top,
+and duplicates collapse:
 
 ```
-wed: farmer walk 1 min | pull-ups x5 | push-ups x20
+every: ring dips x5 | pull-ups x5 | push-ups x20 | ring crunches x12
+wed:   farmer walk 1 min
 ```
+
+Keep the pool short. Grease-the-groove works by hitting the same few movements
+often and well short of failure.
 
 One dialog at a time. A lock file stops a second nudge from stacking a second
 window on top of an unanswered one, and the 15 minute ceiling stops an ignored
