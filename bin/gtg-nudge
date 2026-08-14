@@ -185,6 +185,19 @@ osa() {
 # log lines claiming a timeout, five live windows: the log and the screen
 # disagreed, and the screen was right.
 #
+# Measured 2026-08-14, both shapes asking for a 150s dialog, unattended:
+#
+#   without `with timeout of`  osascript exited at 121s, rc=1,
+#                              "AppleEvent timed out. (-1712)", empty stdout,
+#                              and the window was STILL ON SCREEN afterwards
+#   with `with timeout of 210` osascript exited at 150s, rc=0, "__TIMEOUT__",
+#                              zero windows left, no orphan process
+#
+# The ceiling is 121s in practice, so DIALOG_TIMEOUT + 60 clears it by a wide
+# margin at every setting worth using. The empty stdout in the broken case is
+# why an empty result is now an error rather than a timeout: that string was
+# the bug's only signature, and it was being swallowed.
+#
 # System Events rather than the frontmost application, for two reasons. It is
 # a proper background agent, so the dialog renders as a standard alert instead
 # of whatever a arbitrary app makes of the event -- the mangled window with no

@@ -104,6 +104,18 @@ the application keeps the window on screen forever with nothing left to
 dismiss it. The script then logged `no answer (timed out)`, released the lock,
 and 30 minutes later opened another on top.
 
+Measured 2026-08-14, unattended, both shapes asking for a 150 second dialog:
+
+| | returns after | exit | stdout | window left |
+|---|---|---|---|---|
+| no `with timeout of` | **121s** | 1 (`-1712 AppleEvent timed out`) | *empty* | **yes** |
+| `with timeout of 210` | **150s** | 0 | `__TIMEOUT__` | no |
+
+And the real `gtg-nudge`, run end to end with `DIALOG_TIMEOUT=140` (past that
+121s ceiling): exited 0 after exactly 140s, logged
+`no answer (dismissed itself after 140s)`, left zero windows, no orphan
+process, lock released, `dialog.pid` cleaned.
+
 It cost two days of nudges before it was caught, because the log and the screen
 disagreed and only the log was being read: twelve lines claiming a clean
 timeout, five live windows stacked up behind them. Wrapping each dialog in
