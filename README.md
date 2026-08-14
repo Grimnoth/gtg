@@ -82,6 +82,45 @@ One dialog at a time. A lock file stops a second nudge from stacking a second
 window on top of an unanswered one, and the 15 minute ceiling stops an ignored
 dialog from holding that lock forever and muting everything after it.
 
+## Only one dialog, ever
+
+The nudge is a modal alert that dismisses itself after 15 minutes. That number
+is not arbitrary: fires are 30 minutes apart, so a dialog is always gone well
+before the next is due, and two can never share the screen.
+
+Three guards, in order:
+
+- A **lock** holding the PID of the running nudge. A second fire while a dialog
+  is open logs `skip: a dialog is already open` and exits.
+- A **reaper** that kills any dialog stranded by an earlier run, so a stale
+  window showing a stale recommendation gets replaced rather than added to.
+- **`with timeout of`** wrapping every dialog. See below.
+
+### The bug that made them stack
+
+An Apple Event carries a default **120 second** ceiling. Asking for
+`giving up after 900` means osascript gives up at two minutes and exits, while
+the application keeps the window on screen forever with nothing left to
+dismiss it. The script then logged `no answer (timed out)`, released the lock,
+and 30 minutes later opened another on top.
+
+It cost two days of nudges before it was caught, because the log and the screen
+disagreed and only the log was being read: twelve lines claiming a clean
+timeout, five live windows stacked up behind them. Wrapping each dialog in
+`with timeout of` raises the ceiling above the dialog's own lifetime, so the
+script now outlives its window rather than the reverse.
+
+An empty result from osascript is therefore no longer folded into "timed out".
+It means the dialog **failed to display**, which is a different failure and now
+says so in the log.
+
+### Why System Events
+
+Dialogs are addressed to System Events, a proper background agent, rather than
+to whatever application happens to be frontmost. An arbitrary app renders the
+event however it likes -- iTerm2 produced a window with no text field and a
+stranded Cancel button -- and System Events also measured 1s against 5s.
+
 ## Why a window and not a notification
 
 `osascript`'s `display notification` posts under a bundle that has **no entry**
@@ -145,7 +184,13 @@ Services grant on macOS 14+, and it returns nothing at all over ethernet, which
 is how this machine is usually docked. The gateway MAC is unique per router,
 needs no permission, and behaves identically on wifi and ethernet.
 
-Moved or replaced your router? Re-run `install.sh` at home.
+`~/.config/gtg/home-gateway-mac` holds **one MAC per line**, so a second house,
+an office, or a replaced router can all count as home. On a new network:
+
+```sh
+gtg where     # home or away, and which gateways are known
+gtg home      # count the network you are on right now as home
+```
 
 ## Meeting detection needs Google Calendar synced into macOS
 

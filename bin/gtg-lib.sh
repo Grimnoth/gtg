@@ -36,11 +36,14 @@ current_gateway_mac() {
 }
 
 # Echoes "home" or "away".
+#
+# The file holds one gateway MAC per line, not just one, so a second house, an
+# office, or a replaced router can all count as "home". `gtg home` appends the
+# network you are on now.
 where_am_i() {
-  local home_mac cur_mac
-  home_mac=$(cat "$HOME_MAC_FILE" 2>/dev/null || true)
-  cur_mac=$(current_gateway_mac || true)
-  if [ -n "$home_mac" ] && [ -n "$cur_mac" ] && [ "$cur_mac" = "$home_mac" ]; then
+  local cur
+  cur=$(current_gateway_mac || true)
+  if [ -n "$cur" ] && [ -s "$HOME_MAC_FILE" ] && grep -qxF "$cur" "$HOME_MAC_FILE" 2>/dev/null; then
     printf 'home'
   else
     printf 'away'

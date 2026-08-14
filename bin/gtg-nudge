@@ -95,12 +95,30 @@ style=$(cfg STYLE); style=${style:-picker}
 sound=$(cfg SOUND); sound=${sound:-Ping}
 speak=$(cfg SPEAK)
 
-DIALOG_TIMEOUT=900   # 15 min, then the dialog is torn down and the slot retries
+# 15 min, then the dialog dismisses ITSELF and the slot retries. Kept well
+# under the 30 min gap between fires, so a dialog is always gone before the
+# next one is due and two can never share the screen.
+DIALOG_TIMEOUT=$(cfg DIALOG_TIMEOUT); DIALOG_TIMEOUT=${DIALOG_TIMEOUT:-900}
 
 # One dialog at a time. `choose from list` cannot time itself out, so without
 # this an unanswered dialog would sit forever holding the lock and mute every
 # later nudge -- the same silent death the banner already died once.
 LOCK="$STATE_DIR/nudge.lock"
+DIALOG_PID="$STATE_DIR/dialog.pid"
+
+# Reap a dialog stranded by an earlier run before opening a new one. With the
+# `with timeout of` fix below this should never fire, but a stale window shows
+# a stale recommendation, so replace it rather than let it accumulate.
+if [ -e "$DIALOG_PID" ]; then
+  stale=$(cat "$DIALOG_PID" 2>/dev/null)
+  case "$stale" in ''|*[!0-9]*) stale="" ;; esac
+  if [ -n "$stale" ] && kill -0 "$stale" 2>/dev/null; then
+    kill "$stale" 2>/dev/null
+    note "replaced a stranded dialog"
+  fi
+  rm -f "$DIALOG_PID"
+fi
+
 if [ -e "$LOCK" ] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
   note "skip: a dialog is already open"
   exit 0
@@ -138,7 +156,17 @@ fi
 #
 # Every dialog below now carries its own `giving up after`, so macOS dismisses
 # them and there is nothing left to reap.
-osa() { /usr/bin/osascript 2>/dev/null <<<"$1" || true; }
+osa() {
+  local out pid
+  out=$(mktemp)
+  /usr/bin/osascript >"$out" 2>/dev/null <<<"$1" &
+  pid=$!
+  printf '%s' "$pid" >"$DIALOG_PID"
+  wait "$pid" 2>/dev/null || true
+  rm -f "$DIALOG_PID"
+  cat "$out"
+  rm -f "$out"
+}
 
 # One recommendation and one button, rather than a menu to weigh. The rotation
 # already put the right movement on top, so the default answer is nearly always
@@ -147,16 +175,30 @@ osa() { /usr/bin/osascript 2>/dev/null <<<"$1" || true; }
 # Three buttons is also the hard limit of `display alert` -- and unlike
 # `choose from list`, it supports `giving up after`, which is what makes the
 # orphaned-dialog bug above structurally impossible.
+# `with timeout of` is the whole ballgame, and its absence was the bug.
+#
+# An Apple Event carries a default 120 second ceiling. `giving up after 900`
+# asks the dialog to live 15 minutes, so osascript gave up at two minutes and
+# exited while the application kept the window on screen -- forever, since
+# nothing was left to dismiss it. The script then logged "no answer (timed
+# out)", released the lock, and 30 minutes later stacked another on top. Twelve
+# log lines claiming a timeout, five live windows: the log and the screen
+# disagreed, and the screen was right.
+#
+# System Events rather than the frontmost application, for two reasons. It is
+# a proper background agent, so the dialog renders as a standard alert instead
+# of whatever a arbitrary app makes of the event -- the mangled window with no
+# text field was iTerm2's rendering. And it measured 1s against 5s.
 alert_for() {
-  printf 'tell application %s\n  activate\n  set r to display alert "%s" message "%s" buttons {"Snooze", "Other...", "Did it"} default button "Did it" giving up after %s\n  if gave up of r then\n    return "__TIMEOUT__"\n  else\n    return button returned of r\n  end if\nend tell\n' \
-    "$1" "$(esc "$title")" "$(esc "$2")" "$DIALOG_TIMEOUT"
+  printf 'with timeout of %s seconds\n  tell application "System Events"\n    activate\n    set r to display alert "%s" message "%s" buttons {"Snooze", "Other...", "Did it"} default button "Did it" giving up after %s\n    if gave up of r then\n      return "__TIMEOUT__"\n    else\n      return button returned of r\n    end if\n  end tell\nend timeout\n' \
+    "$(( DIALOG_TIMEOUT + 60 ))" "$(esc "$title")" "$(esc "$1")" "$DIALOG_TIMEOUT"
 }
 
 # Prefilled with the suggestion, so "same movement, different count" is one
 # edit. `display dialog` also carries its own timeout.
 other_for() {
-  printf 'tell application %s\n  activate\n  set r to display dialog "What did you do?" default answer "%s" with title "%s" buttons {"Cancel", "Log it"} default button "Log it" giving up after 300\n  if button returned of r is "Cancel" then\n    return "__CANCEL__"\n  else\n    return text returned of r\n  end if\nend tell\n' \
-    "$1" "$(esc "$2")" "$(esc "$title")"
+  printf 'with timeout of 360 seconds\n  tell application "System Events"\n    activate\n    set r to display dialog "What did you do?" default answer "%s" with title "%s" buttons {"Cancel", "Log it"} default button "Log it" giving up after 300\n    if button returned of r is "Cancel" then\n      return "__CANCEL__"\n    else\n      return text returned of r\n    end if\n  end tell\nend timeout\n' \
+    "$(esc "$1")" "$(esc "$title")"
 }
 
 if [ "$style" = banner ]; then
@@ -176,18 +218,16 @@ else
 or: $hint"
   fi
 
-  answer=$(osa "$(alert_for '(path to frontmost application as text)' "$msg")")
-  if [ -z "$answer" ]; then
-    # Nothing scriptable was frontmost; re-address it to System Events.
-    answer=$(osa "$(alert_for '"System Events"' "$msg")")
-  fi
+  answer=$(osa "$(alert_for "$msg")")
 
   case "$answer" in
-    ""|"__TIMEOUT__") note "no answer (timed out)"; exit 0 ;;  # unstamped, retries
+    # Empty now means the dialog FAILED TO DISPLAY, which is a different
+    # problem from being ignored, and previously both logged the same line.
+    "")               note "ERROR: dialog did not display"; exit 1 ;;
+    "__TIMEOUT__")    note "no answer (dismissed itself after ${DIALOG_TIMEOUT}s)"; exit 0 ;;
     "Snooze")         note "snoozed"; exit 0 ;;                # unstamped, retries
     "Other...")
-      typed=$(osa "$(other_for '(path to frontmost application as text)' "$line")")
-      [ -n "$typed" ] || typed=$(osa "$(other_for '"System Events"' "$line")")
+      typed=$(osa "$(other_for "$line")")
       case "$typed" in
         ""|"__CANCEL__") note "other: cancelled"; exit 0 ;;
       esac

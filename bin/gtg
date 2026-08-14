@@ -10,6 +10,8 @@ gtg            log today's first option as done
 gtg 12         log 12 reps of that option
 gtg "rows x10" log whatever you actually did
 gtg options    list today's choices
+gtg home       count the network you are on now as home
+gtg where      home or away, and why
 gtg skip       record a miss
 gtg today      today's tally
 gtg week       the last 7 days, one line per day
@@ -32,6 +34,29 @@ case "${1:-done}" in
   options) today_options "$where" ;;
 
   page) exec "$(dirname "$0")/gtg-page" "${@:2}" ;;
+
+  home)
+    mac=$(current_gateway_mac || true)
+    if [ -z "$mac" ]; then
+      echo "no gateway visible -- are you on a network?" >&2
+      exit 1
+    fi
+    if grep -qxF "$mac" "$HOME_MAC_FILE" 2>/dev/null; then
+      echo "already counted as home: $mac"
+    else
+      printf '%s\n' "$mac" >>"$HOME_MAC_FILE"
+      echo "added as home: $mac"
+    fi
+    ;;
+
+  where)
+    mac=$(current_gateway_mac || true)
+    echo "  you are:        $where"
+    echo "  this gateway:   ${mac:-none visible}"
+    echo "  known as home:"
+    if [ -s "$HOME_MAC_FILE" ]; then sed 's/^/    /' "$HOME_MAC_FILE"; else echo "    (none)"; fi
+    [ "$where" = away ] && echo "  run 'gtg home' to add this network"
+    ;;
 
   edit) "${EDITOR:-vi}" "$PLAN" ;;
 

@@ -29,7 +29,10 @@ if [ -n "$gw" ]; then
 fi
 case "${mac:-}" in
   *:*:*:*:*:*)
-    printf '%s' "$mac" >"$CONF_DIR/home-gateway-mac"
+    # One MAC per line; `gtg home` appends others. Never clobber existing ones.
+    if ! grep -qxF "$mac" "$CONF_DIR/home-gateway-mac" 2>/dev/null; then
+      printf '%s\n' "$mac" >>"$CONF_DIR/home-gateway-mac"
+    fi
     echo "home     gateway $gw -> $mac"
     ;;
   *)
