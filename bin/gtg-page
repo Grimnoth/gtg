@@ -13,9 +13,12 @@ import sys
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 
-STATE = os.path.expanduser("~/.local/state/gtg")
+# Same override the shell side honours, so an isolated test run cannot read or
+# rewrite the live history page.
+STATE = os.environ.get("GTG_STATE_DIR") or os.path.expanduser("~/.local/state/gtg")
 LOG = os.path.join(STATE, "log.tsv")
 OUT = os.path.join(STATE, "history.html")
+
 WEEKS = 26
 
 
@@ -32,7 +35,8 @@ def norm_ex(ex):
     s = re.sub(r"\d+(\.\d+)?\s*(minutes?|mins?|seconds?|secs?)", " ", s)
     s = re.sub(r"\d+\s*s(?![a-z])", " ", s)
     s = re.sub(r"\s+(total|each|per hand|with|of)(\s|$)", " ", s)
-    s = re.sub(r"\s*x\d+\s*$", "", s)
+    s = re.sub(r"\s*x\d+(\s|$)", " ", s)
+    s = re.sub(r"@", " ", s)
     s = re.sub(r"\s+\d+\s*$", "", s)
     s = re.sub(r"^\d+\s+", "", s)
     s = re.sub(r"[^a-z0-9]", "", s)
@@ -253,7 +257,7 @@ def main():
     if todays:
         items = "".join(
             f'<li><span class="t">{r["dt"].strftime("%H:%M")}</span>'
-            f'<span class="e">{html.escape(r["ex"])}</span>'
+            f'<span class="e">{html.escape(clean_ex(r["ex"]))}</span>'
             f'<span class="m">{"skipped" if r["skip"] else today_meta(r)}'
             f'{"" if r["where"] == "home" else " · away"}</span></li>'
             for r in todays

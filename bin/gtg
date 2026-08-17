@@ -13,6 +13,7 @@ gtg options    list today's choices
 gtg home       count the network you are on now as home
 gtg where      home or away, and why
 gtg skip       record a miss
+gtg add "X"    teach it a new movement (gtg add "swings x10 @ 50 lb" [pool])
 gtg backfill   move weight/duration out of old entry names into their columns
 gtg today      today's tally
 gtg week       the last 7 days, one line per day
@@ -71,7 +72,14 @@ case "${1:-done}" in
     # and never automatic, because it rewrites the log; the previous file is
     # kept alongside as log.tsv.bak.
     if [ ! -s "$LOG" ]; then echo "nothing logged yet"; exit 0; fi
-    cp "$LOG" "$LOG.bak"
+    # Every step checked, and the live log replaced only at the very end by an
+    # atomic rename. The first version wrote `awk ... >"$LOG"`, which truncates
+    # the log the instant the redirect opens -- so a failed `cp` left an empty
+    # log AND printed a success line. Verified: it destroyed 27 rows and
+    # reported "backfilled 0 row(s)".
+    cp "$LOG" "$LOG.bak" || { echo "backup failed; log untouched" >&2; exit 1; }
+    rows_before=$(wc -l <"$LOG.bak")
+    tmp="$LOG.tmp.$$"
     awk -F'\t' -v OFS='\t' "$AWK_PARSE"'
       {
         ts = $1; ex = $2; reps = $3; where = $4; wt = $5; dur = $6
@@ -85,12 +93,34 @@ case "${1:-done}" in
         print ts, ex, reps, where, wt, dur
       }
       END { printf "%d\n", n+0 > "/dev/stderr" }
-    ' "$LOG.bak" >"$LOG" 2>"$STATE_DIR/.backfilled"
+    ' "$LOG.bak" >"$tmp" 2>"$STATE_DIR/.backfilled" \
+      || { rm -f "$tmp" "$STATE_DIR/.backfilled"; echo "conversion failed; log untouched" >&2; exit 1; }
+    rows_after=$(wc -l <"$tmp")
+    if [ "$rows_after" -ne "$rows_before" ]; then
+      rm -f "$tmp" "$STATE_DIR/.backfilled"
+      echo "row count changed ($rows_before -> $rows_after); log untouched" >&2
+      exit 1
+    fi
     changed=$(cat "$STATE_DIR/.backfilled"); rm -f "$STATE_DIR/.backfilled"
-    echo "backfilled $changed row(s); previous log kept at $LOG.bak"
-    diff <(cut -f2-3,5-6 "$LOG.bak") <(cut -f2-3,5-6 "$LOG") \
+    diff <(cut -f2-3,5-6 "$LOG.bak") <(cut -f2-3,5-6 "$tmp") \
       | sed -n 's/^</  was:/p; s/^>/  now:/p' | head -40
+    mv "$tmp" "$LOG"
+    echo "backfilled $changed row(s) of $rows_before; previous log kept at $LOG.bak"
     "$(dirname "$0")/gtg-page" --no-open >/dev/null 2>&1 || true
+    ;;
+
+  add)
+    # Extend the set of movements this tool knows. The registry is plan.txt
+    # itself, so what you add here is also what gets offered.
+    #   gtg add "kettlebell swings x10 @ 50 lb"        -> the every-day pool
+    #   gtg add "stairs, 2 flights" away               -> a named pool
+    if [ -z "${2:-}" ]; then echo 'usage: gtg add "<movement>" [every|away|mon..sun]' >&2; exit 1; fi
+    plan_add "$2" "${3:-every}"
+    case $? in
+      0) echo "added to ${3:-every}: $2"; echo; echo "today's pool is now:"; today_options "$where" | sed 's/^/  /' ;;
+      2) echo "already there: $2" ;;
+      *) exit 1 ;;
+    esac
     ;;
 
   today)
@@ -103,14 +133,18 @@ case "${1:-done}" in
       index($1, d) == 1 {
         n++
         if ($3 ~ /^[0-9]+$/) reps += $3
-        if ($6 != "") secs += $6
+        # A skipped set contributes no time. Totalling its duration counted a
+        # miss as work done.
+        if ($6 != "" && $3 != "skip") secs += $6
         printf "  %s  %s%s%s\n", substr($1, 12, 5), clean($2), human($3, $5, $6), \
                ($3 == "skip" ? "  (skipped)" : "")
       }
       END {
         if (n == 0) { print "  nothing yet today"; exit }
+        # Whole minutes only, the same rule fmt_dur uses: 90s totalled as
+        # "1 min" quietly lost half a minute.
         printf "\n%d set(s)%s%s today\n", n, (reps ? ", " reps " reps" : ""), \
-               (secs ? ", " (secs >= 60 ? int(secs/60) " min" : secs "s") : "")
+               (secs ? ", " ((secs >= 60 && secs % 60 == 0) ? int(secs/60) " min" : secs "s") : "")
       }' "$LOG"
     ;;
 
@@ -166,7 +200,7 @@ case "${1:-done}" in
     awk -F'\t' "$AWK_KEY$AWK_CLEAN"'
       $3 != "skip" {
         k = key($2); c[k]++; if ($3 ~ /^[0-9]+$/) r[k] += $3
-        if ($6 != "") d[k] += $6
+        if ($6 != "") d[k] += $6     # this branch is already non-skip
         if ($5 != "") w[k] = $5      # rows are in order, so the last one wins
         name[k] = clean($2)
       }
@@ -195,10 +229,18 @@ case "${1:-done}" in
       echo "logged: $(record_option "$line" "$where" "$1")  [$where]"
     else
       # Anything else is whatever you actually did: gtg "chin-ups x8".
-      # A comma- or and-separated report becomes one entry per movement.
-      record_line "$1" "$where" | while IFS= read -r piece; do
-        echo "logged: $piece  [$where]"
-      done
+      # An unknown movement is a question, not a guess: nothing is recorded
+      # until you say to add it.
+      if out=$(record_typed "$1" "$where"); then
+        echo "logged: $out  [$where]"
+      elif [ $? -eq 3 ]; then
+        read_piece "$1"
+        echo "unknown movement: $P_NAME" >&2
+        echo "add it with:  gtg add \"$(fmt_piece "$P_NAME" "$P_REPS" "$P_WT" "$P_DUR")\"" >&2
+        exit 1
+      else
+        echo "could not read that as a movement" >&2; exit 1
+      fi
     fi
     ;;
 esac

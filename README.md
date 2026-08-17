@@ -41,10 +41,12 @@ A modal picker listing the day's options, first one preselected, plus
 **Other...** and **Skip this one**. Buttons are **Log it** and **Snooze**.
 
 - Pick an option and **Log it** records it.
-- **Other...** opens a text field for whatever you actually did instead. A
-  trailing `xN` in what you type is read as the rep count, and a report like
-  `10 air squats, 10 pushups` (comma, `;`, `&`, `+` or the word "and") is
-  split into one entry per movement, each with its own count.
+- **Other...** opens a text field for whatever you actually did instead. What
+  you type is looked up against the movements you already have, so a prefix is
+  enough: `kett x15` logs 15 kettlebell swings. A movement it does not know is
+  a question, not a guess -- it offers to add it (see below).
+- One dialog records **one set**. Report two movements and it will not know
+  the combination, and will ask rather than split it apart on your behalf.
 - **Snooze**, or letting it time out after 15 minutes, deliberately leaves the
   slot unconsumed, so the next fire retries rather than skipping the hour.
 
@@ -63,14 +65,53 @@ without a schedule. The point is that the preselected item is nearly always
 the right answer, which keeps a nudge at one click instead of a menu to
 deliberate over. Every other option is still right there when you want it.
 
-Matching ignores the rep count and normalizes the spelling, so `ring dips x5`
-in the plan and `5 ring dips` typed into **Other...** are the same movement,
-and `pushups`, `push-ups` and `Push Ups` all count as one. Outright typos are
-snapped at logging time: a typed movement within one letter of a known one
-(two letters for long names) adopts the known spelling, so `10 puships` logs
-as `Pushups x10` instead of founding a new exercise. Free-text entries feed
-the rotation, and changing a rep count does not make a movement look
+Matching ignores the rep count, the weight and the duration, and normalizes
+the spelling, so `ring dips x5` in the plan and `5 ring dips` typed into
+**Other...** are the same movement, and `pushups`, `push-ups` and `Push Ups`
+all count as one. Changing any of the numbers does not make a movement look
 untouched.
+
+## The movements are a set you extend, not text it guesses at
+
+`plan.txt` **is** the list of movements. Anything in a pool there, plus
+anything already in the log, is what the tool knows -- there is no second
+registry to drift out of step with the plan you actually read.
+
+```sh
+gtg add "kettlebell swings x10 @ 50 lb"        # the every-day pool
+gtg add "farmer walk 2 min @ 100 lb" wed       # a named pool
+gtg add "stairs, 2 flights" away
+```
+
+A weight written into the entry is used from the moment you add it, so a new
+movement is usable immediately rather than only after you have logged it once
+with the weight spelled out. Adding a movement that is already there is
+refused rather than duplicated; to change an entry, log it once with the new
+weight or run `gtg edit`.
+
+Typing something it does not know gets you an offer to add it -- one button in
+the dialog, or the exact `gtg add` line on the command line. Nothing is
+recorded until you say yes.
+
+### Why it asks instead of guessing
+
+It used to guess, in two ways, and both quietly corrupted the log.
+
+It **snapped near-miss spellings** to the closest known movement within an
+edit distance of one, or two for longer names. That turns `10 puships` into
+`Pushups`, which is lovely, and it also turns `Incline Press` into `Decline
+Press` -- distance 2, both long, exactly the threshold -- merging two real
+movements with nothing in the log to say it happened.
+
+It **split on separators**, so one report could become several entries. That
+turns `10 air squats and 10 pushups` into two sets, which is also lovely, and
+it tears `clean and press x5` in half, and breaks the `stairs, 2 flights`
+option shipped in this file's own away pool.
+
+Both were heuristics guessing at intent, and every fix for one made the other
+worse. A closed set you extend deliberately needs no guessing: an exact or
+unambiguous-prefix match is decidable, and explainable when it is wrong. The
+cost is that logging two movements at once takes two entries.
 
 ## A movement is a name, not a sentence
 
@@ -81,11 +122,11 @@ A set has up to four separable facts, and only the first is the movement:
 | **name** | `Farmer Walk` |
 | **reps** | `x10` |
 | **duration** | `1 min`, `30s` -- stored as seconds, so `1 minute` and `60s` agree |
+| **weight** | `100 lbs`, `24kg`, `@ 50` -- a bare `@ 50` assumes pounds |
 
 Minutes must be spelled `min`, never a bare `m`. In exercise text `400m` is
 metres far more often than minutes, and reading it the other way logged a
 sprint as a 6.7 hour effort. A bare `s` is kept, since `30s` has no such rival.
-| **weight** | `100 lbs`, `24kg`, `@ 50` -- a bare `@ 50` assumes pounds |
 
 They can arrive in any order and any shape. `Farmer Walk 1 minute - 100 lbs
 total`, `50 lb kettlebell swings x10` and `kettlebell swings x10 @ 50 lb` all
@@ -123,9 +164,22 @@ Older rows have the weight and duration stranded inside the name. Every reader
 strips them at read time, so nothing looks broken, but the weight in such a row
 cannot be remembered -- it is still just text.
 
-`gtg backfill` re-parses those rows into the real columns. It copies the log to
-`log.tsv.bak` first and prints what it changed. It is opt-in and never runs on
-its own, because it rewrites your data.
+`gtg backfill` re-parses those rows into the real columns. It is opt-in and
+never runs on its own, because it rewrites your data. It copies the log to
+`log.tsv.bak`, builds the new version in a temporary file, refuses to continue
+if the row count changes, and only then replaces the log with an atomic rename.
+Any failure leaves the original untouched.
+
+## Tests
+
+```sh
+./test/run.sh
+```
+
+Everything runs under `GTG_STATE_DIR` and `GTG_CONF_DIR` against a throwaway
+directory, and the suite asserts at the end that the real log was never
+touched. That override exists because it was once missing: a "dry run" of
+`backfill` silently rewrote the live log instead.
 
 ## The plan file
 
@@ -343,6 +397,7 @@ than a reminder system that quietly stops reminding and takes a week to notice.
 | `~/.config/gtg/home-gateway-mac` | Written by `install.sh`. |
 | `~/.local/state/gtg/log.tsv` | The log. `iso8601 · exercise · reps · home\|away · weight · seconds` |
 | `~/.local/state/gtg/log.tsv.bak` | Written by `gtg backfill` before it rewrites anything. |
+| `test/run.sh` | The test suite. Runs against a scratch dir; cannot touch your log. |
 | `~/.local/state/gtg/nudge.log` | What the scheduled job did, and why it skipped. |
 | `~/.local/state/gtg/last-nudge` | Debounce stamp. Delete it to re-arm now. |
 | `~/.local/state/gtg/nudge.lock` | Held while a dialog is open. |

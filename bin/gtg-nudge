@@ -251,6 +251,13 @@ alert_for() {
     "$(( DIALOG_TIMEOUT + 60 ))" "$(esc "$title")" "$(esc "$1")" "$DIALOG_TIMEOUT"
 }
 
+# Asked when what you typed is not a movement this tool knows. The alternative
+# was guessing, and guessing merged two real movements without saying so.
+confirm_new_for() {
+  printf 'with timeout of %s seconds\n  tell application "System Events"\n    activate\n    set r to display alert "New movement" message "Add \"%s\" to your pool?" buttons {"Cancel", "Add it"} default button "Add it" giving up after 120\n    if gave up of r then\n      return "__TIMEOUT__"\n    else\n      return button returned of r\n    end if\n  end tell\nend timeout\n' \
+    "180" "$(esc "$1")"
+}
+
 # Prefilled with the suggestion, so "same movement, different count" is one
 # edit. `display dialog` also carries its own timeout.
 other_for() {
@@ -289,10 +296,24 @@ or: $hint"
         ""|"__CANCEL__") note "other: cancelled"; exit 0 ;;
       esac
       line="$typed"
-      # Splits "10 air squats, 10 pushups" into one record per movement.
-      record_line "$line" "$where" | while IFS= read -r piece; do
-        note "logged (typed): $piece"
-      done
+      # A movement we know is logged straight away. One we do not know is a
+      # QUESTION, not a guess -- the old code silently snapped it to whatever
+      # known name was within an edit distance of two, which quietly merged
+      # "Incline Press" into "Decline Press". Confirming adds it to the pool,
+      # so the set of movements is something you extend on purpose.
+      if out=$(record_typed "$line" "$where"); then
+        note "logged (typed): $out"
+      elif [ $? -eq 3 ]; then
+        read_piece "$line"
+        pretty=$(fmt_piece "$P_NAME" "$P_REPS" "$P_WT" "$P_DUR")
+        if [ "$(osa "$(confirm_new_for "$pretty")")" = "Add it" ]; then
+          note "logged (new movement): $(record_new "$line" "$where")"
+        else
+          note "unknown movement declined: $P_NAME"; exit 0
+        fi
+      else
+        note "could not read that as a movement: $line"; exit 0
+      fi
       ;;
     *)  # "Did it"
       # Through record_option, not record: the line on screen may carry an

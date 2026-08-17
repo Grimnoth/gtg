@@ -38,7 +38,12 @@ AWK_KEY='
     gsub(/[0-9]+(\.[0-9]+)?[ \t]*(minutes?|mins?|seconds?|secs?)/, " ", s)
     gsub(/[0-9]+[ \t]*s([^a-z]|$)/, " ", s)
     gsub(/[ \t]+(total|each|per hand|with|of)([ \t]|$)/, " ", s)
-    sub(/[ \t]*x[0-9]+[ \t]*$/, "", s)
+    # Anywhere, not anchored at the end. Once decorate_weights appends
+    # "@ 50 lb", the count is no longer last, and an end-anchored strip left
+    # "kettlebellswingsx10" -- which never matched the "kettlebellswing" the
+    # same set was logged under, so rotation read the movement as never done.
+    gsub(/[ \t]*[xX][0-9]+([ \t]|$)/, " ", s)
+    gsub(/@/, " ", s)
     sub(/[ \t]+[0-9]+[ \t]*$/, "", s)
     sub(/^[0-9]+[ \t]+/, "", s)
     gsub(/[^a-z0-9]/, "", s)
@@ -64,11 +69,17 @@ AWK_CLEAN='
   function clean(s) {
     gsub(/[0-9]+(\.[0-9]+)?[ \t]*([Ll][Bb][Ss]?|[Kk][Gg][Ss]?|#)/, " ", s)
     gsub(/[0-9]+(\.[0-9]+)?[ \t]*([Mm][Ii][Nn][A-Za-z]*|[Ss][Ee][Cc][A-Za-z]*)/, " ", s)
+    gsub(/[ \t]+([Tt][Oo][Tt][Aa][Ll]|[Ee][Aa][Cc][Hh])([ \t]|$)/, " ", s)
     gsub(/[0-9]+[ \t]*[sS]([^A-Za-z]|$)/, " ", s)
-    sub(/[ \t]*[xX][0-9]+[ \t]*$/, "", s)
+    # Anywhere, not end-anchored -- same reason as in key(). Left anchored,
+    # the plan entry "sled push x5 @ 90 lb" cleaned to "sled push x5", which
+    # then rendered as "sled push x5 x5".
+    gsub(/[ \t]*[xX][0-9]+([ \t]|$)/, " ", s)
     sub(/^[0-9]+[ \t]+/, "", s)
     sub(/[ \t]+[0-9]+[ \t]*$/, "", s)
-    gsub(/[ \t]+-[ \t]+/, " ", s); gsub(/[,@]/, " ", s)
+    # "@" goes, the comma stays: a comma is part of names you actually use,
+    # such as the shipped "stairs, 2 flights".
+    gsub(/[ \t]+-[ \t]+/, " ", s); gsub(/@/, " ", s)
     gsub(/[ \t]+(total|each|per hand|with|of)[ \t]*$/, "", s)
     gsub(/^[ \t]+|[ \t]+$/, "", s); gsub(/[ \t]+/, " ", s)
     return s
@@ -243,10 +254,10 @@ AWK_PARSE='
       # "min" spelled out, never a bare "m": in exercise text "400m" is metres
       # far more often than minutes, and reading it as minutes silently logged a
       # 6.7 hour sprint. A bare "s" stays -- "30s" has no such rival.
-      if (match(s, /[0-9]+(\.[0-9]+)?[ \t]*(minutes?|mins?)([^a-zA-Z]|$)/)) {
+      if (match(s, /[0-9]+(\.[0-9]+)?[ \t]*([Mm][Ii][Nn][Uu][Tt][Ee][Ss]?|[Mm][Ii][Nn][Ss]?)([^a-zA-Z]|$)/)) {
         t = substr(s, RSTART, RLENGTH); s = substr(s,1,RSTART-1) " " substr(s,RSTART+RLENGTH)
         gsub(/[^0-9.]/, "", t); d = int(t * 60)
-      } else if (match(s, /[0-9]+(\.[0-9]+)?[ \t]*(seconds?|secs?|s)([^a-zA-Z]|$)/)) {
+      } else if (match(s, /[0-9]+(\.[0-9]+)?[ \t]*([Ss][Ee][Cc][Oo][Nn][Dd][Ss]?|[Ss][Ee][Cc][Ss]?|[Ss])([^a-zA-Z]|$)/)) {
         t = substr(s, RSTART, RLENGTH); s = substr(s,1,RSTART-1) " " substr(s,RSTART+RLENGTH)
         gsub(/[^0-9.]/, "", t); d = int(t)
       }
@@ -258,8 +269,8 @@ AWK_PARSE='
       } else if (match(s, /[ \t][0-9]+[ \t]*$/)) {
         t=substr(s,RSTART,RLENGTH); s=substr(s,1,RSTART-1); gsub(/[^0-9]/,"",t); r=t
       }
-      gsub(/[ \t]+-[ \t]+/, " ", s); gsub(/[,@]/, " ", s)
-      gsub(/[ \t]+(total|each|per hand|with|of)[ \t]*$/, "", s)
+      gsub(/[ \t]+-[ \t]+/, " ", s); gsub(/@/, " ", s)
+      gsub(/[ \t]+([Tt][Oo][Tt][Aa][Ll]|[Ee][Aa][Cc][Hh]|[Pp]er hand|[Ww][Ii][Tt][Hh]|[Oo][Ff])[ \t]*$/, "", s)
       gsub(/[ \t]+[xX][ \t]*$/, "", s)   # a count taken away can leave its "x"
       gsub(/^[ \t]+|[ \t]+$/, "", s); gsub(/[ \t]+/, " ", s)
       PN = s; PR = r; PW = w; PD = d
@@ -277,17 +288,43 @@ read_piece() {
     < <(parse_piece "$1") || true
 }
 
-# The weight last used for a movement, or nothing.
+# The weight to assume for a movement, or nothing.
 #
 # This is what makes "kettlebell swings x10" mean the 50 lb bell without saying
-# so. Rows are appended in order, so the last match simply wins.
+# so. Two sources, in order:
+#
+#   1. what you last actually lifted -- rows are appended in order, so the last
+#      match wins, and changing weight once changes it from then on;
+#   2. failing that, the weight written into the plan entry.
+#
+# The plan fallback is what makes a movement usable the moment you add it:
+# `gtg add "sled push x5 @ 90 lb"` should mean 90 lb straight away, not only
+# after you have logged it once with the weight spelled out.
 last_weight_for() {
-  [ -s "$LOG" ] || return 0
-  awk -F'\t' -v target="$1" "$AWK_KEY"'
-    BEGIN { want = key(target) }
-    $3 != "skip" && $5 != "" && key($2) == want { w = $5 }
-    END { if (w != "") print w }
-  ' "$LOG"
+  local w=""
+  if [ -s "$LOG" ]; then
+    w=$(awk -F'\t' -v target="$1" "$AWK_KEY"'
+      BEGIN { want = key(target) }
+      $3 != "skip" && $5 != "" && key($2) == want { w = $5 }
+      END { if (w != "") print w }
+    ' "$LOG")
+  fi
+  [ -n "$w" ] || w=$(plan_weight_for "$1")
+  printf '%s' "$w"
+}
+
+# The weight declared in a plan entry for a movement, or nothing.
+plan_weight_for() {
+  local target="$1"
+  for k in every away mon tue wed thu fri sat sun; do plan_line "$k"; done \
+    | tr '|' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' \
+    | while IFS= read -r opt; do
+        read_piece "$opt"
+        [ -n "$P_WT" ] || continue
+        [ "$(printf '%s\n' "$P_NAME" | awk "$AWK_KEY"'{print key($0)}')" \
+          = "$(printf '%s\n' "$target" | awk "$AWK_KEY"'{print key($0)}')" ] || continue
+        printf '%s' "$P_WT"; break
+      done
 }
 
 # 90 -> "90s", 120 -> "2 min". Whole minutes read as minutes, nothing else does.
@@ -323,115 +360,111 @@ record() {
   "$(dirname "$0")/gtg-page" --no-open >/dev/null 2>&1 || true
 }
 
-# Snap a typed movement to a known one when the spelling is a near miss, so
-# "10 puships" logs as the Pushups you already track instead of forking a new
-# exercise. Known movements come from the log and the plan. A match within
-# edit distance 1 (2 when both names have 8+ letters) adopts the known
-# spelling; the limits are chosen so "arisquats" still finds "air squats"
-# while "pushup" can never swallow "pullup" (distance 2 at 6 letters).
-# Exact-key matches pass through untouched -- read-time normalization already
-# merges those. Prints the piece to record, corrected or not.
-canon_piece() {
-  local piece="$1" name
-  name=$({
-    awk -F'\t' '$3 != "skip" && $2 != "" { print "L\t" $2 }' "$LOG" 2>/dev/null
+# Every movement this tool knows, as "key<TAB>name", newest spelling last.
+#
+# Two sources, and both are yours: the pools in plan.txt, and anything already
+# in the log. That is the whole registry -- there is no separate database to
+# drift out of step with the plan you actually read.
+known_movements() {
+  {
     for k in every away mon tue wed thu fri sat sun; do plan_line "$k"; done \
-      | tr '|' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-      | grep -v '^$' | sed 's/^/P\t/'
-    printf 'T\t%s\n' "$piece"
-  } | awk -F'\t' "$AWK_KEY$AWK_CLEAN"'
-    function lev(a, b,   i, j, c, n, m, d) {
-      n = length(a); m = length(b)
-      for (j = 0; j <= m; j++) d[0, j] = j
-      for (i = 1; i <= n; i++) {
-        d[i, 0] = i
-        for (j = 1; j <= m; j++) {
-          c = (substr(a, i, 1) == substr(b, j, 1)) ? 0 : 1
-          d[i, j] = d[i-1, j] + 1
-          if (d[i, j-1] + 1 < d[i, j]) d[i, j] = d[i, j-1] + 1
-          if (d[i-1, j-1] + c < d[i, j]) d[i, j] = d[i-1, j-1] + c
-        }
-      }
-      return d[n, m]
-    }
-    $1 == "L" { k = key($2); if (k != "") { pop[k]++; cnt[k SUBSEP clean($2)]++; known[k] = 1 } next }
-    $1 == "P" { k = key($2); if (k != "") { if (!(k in plan)) plan[k] = clean($2); known[k] = 1 } next }
-    $1 == "T" { typed = $2 }
-    END {
-      tk = key(typed)
-      if (length(tk) < 3 || (tk in known)) exit
-      best = ""; bestd = 99
-      for (k in known) {
-        d = lev(tk, k)
-        lim = (length(tk) >= 8 && length(k) >= 8) ? 2 : 1
-        if (d > lim) continue
-        if (d < bestd || (d == bestd && pop[k] > pop[best])) { best = k; bestd = d }
-      }
-      if (best == "") exit
-      # The spelling to adopt: most frequent in the log, else the plan line.
-      bestn = ""; bc = -1
-      for (ck in cnt) {
-        split(ck, p, SUBSEP)
-        if (p[1] == best && cnt[ck] > bc) { bc = cnt[ck]; bestn = p[2] }
-      }
-      if (bestn == "") bestn = plan[best]
-      if (bestn != "") print bestn
-    }')
-  printf '%s' "${name:-$piece}"
+      | tr '|' '\n'
+    awk -F'\t' '$2 != "" { print $2 }' "$LOG" 2>/dev/null
+  } \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' \
+    | awk "$AWK_KEY$AWK_CLEAN"'
+        { k = key($0); if (k != "") name[k] = clean($0) }
+        END { for (k in name) printf "%s\t%s\n", k, name[k] }'
 }
 
-# Log an option the picker already chose, rather than free text you typed.
+# Resolve typed text to a movement this tool already knows. Prints the
+# canonical name, or nothing when it is not a movement we have seen.
 #
-# The option line may carry an "@ 50 lb" that decorate_weights put there, so it
-# still has to be taken apart -- otherwise the most-used path of all ("Did it")
-# would write the weight back into the movement NAME, which is the exact tangle
-# this whole scheme exists to undo.
+# Exact key first, then an unambiguous prefix, so "kett" finds "kettlebell
+# swings" but a prefix matching two movements finds neither. Both rules are
+# decidable and explainable when they are wrong.
 #
-# reps_override wins when given (`gtg 12`), and the literal "skip" passes
-# straight through as the reps field.
-record_option() {
-  local line="$1" where="$2" reps="${3:-}" wt
-  read_piece "$line"
-  wt="$P_WT"; [ -n "$wt" ] || wt=$(last_weight_for "$P_NAME")
-  [ -n "$reps" ] && P_REPS="$reps"
-  record "$P_NAME" "$P_REPS" "$where" "$wt" "$P_DUR"
-  fmt_piece "$P_NAME" "$P_REPS" "$wt" "$P_DUR"
+# This replaced an edit-distance guess that silently rewrote what you typed.
+# "Incline Press" and "Decline Press" are distance 2 -- exactly the threshold
+# it auto-corrected at -- so two real movements quietly became one, and the
+# log said nothing. A closed set you extend on purpose beats a guess.
+resolve_movement() {
+  [ -n "${1:-}" ] || return 0
+  printf '%s\n' "$1" | awk "$AWK_KEY"'{print key($0)}' | {
+    read -r want
+    [ -n "$want" ] || exit 0
+    known_movements | awk -F'\t' -v want="$want" '
+      $1 == want { exact = $2 }
+      index($1, want) == 1 { pfx[$2]; n++ }
+      END {
+        if (exact != "") { print exact; exit }
+        if (n == 1) for (p in pfx) print p
+      }'
+  }
 }
 
-# Split free text into one record per movement: "10 air squats, 10 pushups"
-# is two exercises told in one breath, and a single row for it would credit
-# only the first. Commas, semicolons, "&", "+" and the word "and" separate.
+# Add a movement to a pool in plan.txt, so the set of known movements is
+# something you extend rather than something the parser invents.
+# plan_add "kettlebell swings x10 @ 50 lb" [every|away|mon|...]
+plan_add() {
+  local entry="$1" pool="${2:-every}" cur
+  entry=$(printf '%s' "$entry" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  [ -n "$entry" ] || return 1
+  [ -w "$PLAN" ] || { echo "cannot write $PLAN" >&2; return 1; }
+  cur=$(plan_line "$pool")
+  if [ -n "$cur" ]; then
+    # Already there? Compare on the movement key, not the spelling.
+    if printf '%s\n' "$cur" | tr '|' '\n' \
+         | awk -v e="$entry" "$AWK_KEY"'
+             BEGIN { want = key(e) } key($0) == want { found = 1 }
+             END { exit !found }'; then
+      return 2
+    fi
+    # A pool line already exists: extend it in place.
+    awk -v pool="$pool" -v entry="$entry" '
+      $0 ~ "^" pool ":" { print $0 " | " entry; next } { print }' "$PLAN" >"$PLAN.tmp"
+  elif grep -q "^$pool:" "$PLAN"; then
+    awk -v pool="$pool" -v entry="$entry" '
+      $0 ~ "^" pool ":" { print pool ": " entry; next } { print }' "$PLAN" >"$PLAN.tmp"
+  else
+    cp "$PLAN" "$PLAN.tmp" && printf '%s: %s\n' "$pool" "$entry" >>"$PLAN.tmp"
+  fi
+  [ -s "$PLAN.tmp" ] || { rm -f "$PLAN.tmp"; echo "refusing to write an empty plan" >&2; return 1; }
+  mv "$PLAN.tmp" "$PLAN"
+}
+
+# Log one typed report as ONE set.
 #
-# Each piece is then taken apart by parse_piece, typo-snapped by canon_piece,
-# and -- when no weight was typed -- given the weight it carried last time.
-# That is what lets "kettlebell swings x10" mean the 50 lb bell.
+# Deliberately no splitting on commas or the word "and". Splitting every
+# separator tore real movement names apart -- "clean and press x5" became two
+# entries, and the shipped `stairs, 2 flights` option became "stairs" plus
+# "2 flights". One dialog, one set, is both simpler and correct.
 #
-# Weight is inherited; duration deliberately is NOT. Duration is the thing you
-# vary (a 1 minute carry today, 2 minutes tomorrow), so assuming the old value
-# would quietly log a set you did not do.
-#
-# Echoes each piece as recorded, one per line, so callers can report exactly
-# what landed -- including a spelling correction or an assumed weight.
-record_line() {
+# Prints the recorded line. Returns 3, printing nothing, when the movement is
+# not one we know: the caller decides whether to add it, which is a question
+# worth asking rather than a guess worth making.
+record_typed() {
   local text="$1" where="$2" name wt
-  printf '%s\n' "$text" \
-    | awk '{
-        gsub(/[ \t]+(and|And|AND)[ \t]+/, "\n")
-        gsub(/[ \t]+[+&][ \t]+/, "\n")
-        gsub(/[,;]+/, "\n")
-        print
-      }' \
-    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-    | grep -v '^$' \
-    | while IFS= read -r piece; do
-        read_piece "$piece"
-        name=$(canon_piece "$P_NAME")
-        wt="$P_WT"
-        [ -n "$wt" ] || wt=$(last_weight_for "$name")
-        record "$name" "$P_REPS" "$where" "$wt" "$P_DUR"
-        fmt_piece "$name" "$P_REPS" "$wt" "$P_DUR"; printf '\n'
-      done
+  read_piece "$text"
+  [ -n "$P_NAME" ] || return 1
+  name=$(resolve_movement "$P_NAME")
+  [ -n "$name" ] || return 3
+  wt="$P_WT"; [ -n "$wt" ] || wt=$(last_weight_for "$name")
+  record "$name" "$P_REPS" "$where" "$wt" "$P_DUR"
+  fmt_piece "$name" "$P_REPS" "$wt" "$P_DUR"; printf '\n'
 }
+
+# Log a typed report for a movement you have just agreed to add.
+record_new() {
+  local text="$1" where="$2" pool="${3:-every}" wt
+  read_piece "$text"
+  [ -n "$P_NAME" ] || return 1
+  plan_add "$(fmt_piece "$P_NAME" "$P_REPS" "$P_WT" "$P_DUR")" "$pool" || true
+  wt="$P_WT"
+  record "$P_NAME" "$P_REPS" "$where" "$wt" "$P_DUR"
+  fmt_piece "$P_NAME" "$P_REPS" "$wt" "$P_DUR"; printf '\n'
+}
+
 
 # Escape for embedding in an AppleScript double-quoted string.
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
