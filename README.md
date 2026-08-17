@@ -42,7 +42,9 @@ A modal picker listing the day's options, first one preselected, plus
 
 - Pick an option and **Log it** records it.
 - **Other...** opens a text field for whatever you actually did instead. A
-  trailing `xN` in what you type is read as the rep count.
+  trailing `xN` in what you type is read as the rep count, and a report like
+  `10 air squats, 10 pushups` (comma, `;`, `&`, `+` or the word "and") is
+  split into one entry per movement, each with its own count.
 - **Snooze**, or letting it time out after 15 minutes, deliberately leaves the
   slot unconsumed, so the next fire retries rather than skipping the hour.
 
@@ -61,9 +63,69 @@ without a schedule. The point is that the preselected item is nearly always
 the right answer, which keeps a nudge at one click instead of a menu to
 deliberate over. Every other option is still right there when you want it.
 
-Matching ignores the rep count, so `ring dips x5` in the plan and `5 ring
-dips` typed into **Other...** are the same movement. Free-text entries feed
-the rotation, and changing a rep count does not make a movement look untouched.
+Matching ignores the rep count and normalizes the spelling, so `ring dips x5`
+in the plan and `5 ring dips` typed into **Other...** are the same movement,
+and `pushups`, `push-ups` and `Push Ups` all count as one. Outright typos are
+snapped at logging time: a typed movement within one letter of a known one
+(two letters for long names) adopts the known spelling, so `10 puships` logs
+as `Pushups x10` instead of founding a new exercise. Free-text entries feed
+the rotation, and changing a rep count does not make a movement look
+untouched.
+
+## A movement is a name, not a sentence
+
+A set has up to four separable facts, and only the first is the movement:
+
+| | |
+| --- | --- |
+| **name** | `Farmer Walk` |
+| **reps** | `x10` |
+| **duration** | `1 min`, `30s` -- stored as seconds, so `1 minute` and `60s` agree |
+
+Minutes must be spelled `min`, never a bare `m`. In exercise text `400m` is
+metres far more often than minutes, and reading it the other way logged a
+sprint as a 6.7 hour effort. A bare `s` is kept, since `30s` has no such rival.
+| **weight** | `100 lbs`, `24kg`, `@ 50` -- a bare `@ 50` assumes pounds |
+
+They can arrive in any order and any shape. `Farmer Walk 1 minute - 100 lbs
+total`, `50 lb kettlebell swings x10` and `kettlebell swings x10 @ 50 lb` all
+pull apart correctly. Whatever is left after the numbers are lifted out is the
+name.
+
+This matters because the name is the identity. Leave a weight or a duration
+inside it and every change of either founds a brand new exercise: a 1 minute
+carry and a 2 minute carry stop being the same movement, `gtg stats` splits
+them, and the rotation offers you one while thinking you have neglected the
+other.
+
+### The weight is remembered
+
+You swing a 50 lb kettlebell. You should not have to say so every time.
+
+A set logged without a weight inherits **the weight that movement carried last
+time**, and the picker says so up front -- the preselected option reads
+`kettlebell swings x10 @ 50 lb`, so one click logs the weight with nothing
+typed. Naming a different weight overrides it, and from then on the new one is
+what gets remembered.
+
+**Duration is deliberately not inherited.** Duration is the thing you vary, so
+assuming last time's would quietly log a set you did not do. Weight is a
+property of the equipment; duration is a property of the effort.
+
+One limit worth knowing: `100 lbs total` on a farmer walk means 50 per hand,
+and the tool stores the number you typed without knowing which convention you
+meant. Mix "total" and "per hand" for the same movement and the memory will be
+confidently wrong. Pick one and stay with it.
+
+### Entries written before this existed
+
+Older rows have the weight and duration stranded inside the name. Every reader
+strips them at read time, so nothing looks broken, but the weight in such a row
+cannot be remembered -- it is still just text.
+
+`gtg backfill` re-parses those rows into the real columns. It copies the log to
+`log.tsv.bak` first and prints what it changed. It is opt-in and never runs on
+its own, because it rewrites your data.
 
 ## The plan file
 
@@ -279,7 +341,8 @@ than a reminder system that quietly stops reminding and takes a week to notice.
 | --- | --- |
 | `~/.config/gtg/plan.txt` | Your plan and settings. Yours; never overwritten. |
 | `~/.config/gtg/home-gateway-mac` | Written by `install.sh`. |
-| `~/.local/state/gtg/log.tsv` | The log. `iso8601 · exercise · reps · home\|away` |
+| `~/.local/state/gtg/log.tsv` | The log. `iso8601 · exercise · reps · home\|away · weight · seconds` |
+| `~/.local/state/gtg/log.tsv.bak` | Written by `gtg backfill` before it rewrites anything. |
 | `~/.local/state/gtg/nudge.log` | What the scheduled job did, and why it skipped. |
 | `~/.local/state/gtg/last-nudge` | Debounce stamp. Delete it to re-arm now. |
 | `~/.local/state/gtg/nudge.lock` | Held while a dialog is open. |

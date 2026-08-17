@@ -7,6 +7,7 @@ hosted copy would be a snapshot that quietly goes out of date.
 """
 import html
 import os
+import re
 import subprocess
 import sys
 from collections import Counter, defaultdict
@@ -16,6 +17,65 @@ STATE = os.path.expanduser("~/.local/state/gtg")
 LOG = os.path.join(STATE, "log.tsv")
 OUT = os.path.join(STATE, "history.html")
 WEEKS = 26
+
+
+def norm_ex(ex):
+    """Movement key: "Pushups", "push-ups x10" and "10 push ups" -> "pushup".
+
+    Weight and duration are stripped too, so "farmer walk 1 min" and "farmer
+    walk 2 min @ 100 lb" are one movement. New rows arrive already clean; this
+    is the shim for rows written before those columns existed.
+
+    Hand-synced twin of $AWK_KEY in gtg-lib.sh -- keep the two in step."""
+    s = ex.lower()
+    s = re.sub(r"\d+(\.\d+)?\s*(lbs?|kgs?|#)", " ", s)
+    s = re.sub(r"\d+(\.\d+)?\s*(minutes?|mins?|seconds?|secs?)", " ", s)
+    s = re.sub(r"\d+\s*s(?![a-z])", " ", s)
+    s = re.sub(r"\s+(total|each|per hand|with|of)(\s|$)", " ", s)
+    s = re.sub(r"\s*x\d+\s*$", "", s)
+    s = re.sub(r"\s+\d+\s*$", "", s)
+    s = re.sub(r"^\d+\s+", "", s)
+    s = re.sub(r"[^a-z0-9]", "", s)
+    s = re.sub(r"s$", "", s)
+    return s or ex.lower()
+
+
+def clean_ex(ex):
+    """The spelling to display: counts, weight and duration stripped, case kept."""
+    s = re.sub(r"\d+(\.\d+)?\s*(lbs?|kgs?|#)", " ", ex, flags=re.I)
+    s = re.sub(r"\d+(\.\d+)?\s*(min[a-z]*|sec[a-z]*)", " ", s, flags=re.I)
+    s = re.sub(r"\d+\s*s(?![a-z])", " ", s, flags=re.I)
+    s = re.sub(r"\s*[xX]\d+\s*$", "", s)
+    s = re.sub(r"^\d+\s+", "", s)
+    s = re.sub(r"\s+\d+\s*$", "", s)
+    s = re.sub(r"\s+-\s+", " ", s)
+    s = re.sub(r"[,@]", " ", s)
+    s = re.sub(r"\s+(total|each|per hand|with|of)\s*$", "", s, flags=re.I)
+    return re.sub(r"\s+", " ", s).strip() or ex
+
+
+def fmt_dur(secs):
+    """90 -> "90s", 120 -> "2 min"."""
+    if not secs:
+        return ""
+    return f"{secs // 60} min" if secs >= 60 and secs % 60 == 0 else f"{secs}s"
+
+
+def fmt_wt(w):
+    """100lb -> "100 lb"."""
+    return re.sub(r"^([\d.]+)", r"\1 ", w) if w else ""
+
+
+def today_meta(r):
+    """reps / duration / weight for one row, as one line, blank parts dropped."""
+    bits = []
+    if r["reps"]:
+        bits.append(f'{r["reps"]} reps')
+    if r["dur"]:
+        bits.append(fmt_dur(r["dur"]))
+    if r["weight"]:
+        bits.append("@ " + fmt_wt(r["weight"]))
+    return " · ".join(bits)
 
 
 def load():
@@ -28,6 +88,10 @@ def load():
             if len(parts) < 4:
                 continue
             ts, ex, reps, where = parts[0], parts[1], parts[2], parts[3]
+            # Columns 5 and 6 were appended later; rows written before they
+            # existed are 4 fields long and simply have neither.
+            weight = parts[4] if len(parts) > 4 else ""
+            dur = parts[5] if len(parts) > 5 else ""
             try:
                 dt = datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
             except ValueError:
@@ -39,6 +103,8 @@ def load():
                     "reps": int(reps) if reps.isdigit() else 0,
                     "where": where,
                     "skip": reps == "skip",
+                    "weight": weight,
+                    "dur": int(dur) if dur.isdigit() else 0,
                 }
             )
     return rows
@@ -70,8 +136,11 @@ def main():
 
     per_day = Counter()
     skips_per_day = Counter()
-    per_ex = Counter()
+    per_ex = Counter()        # keyed by normalized movement
     reps_per_ex = Counter()
+    secs_per_ex = Counter()
+    wt_per_ex = {}            # normalized key -> most recent weight
+    ex_name = {}              # normalized key -> latest spelling
     per_hour = Counter()
     per_where = Counter()
     total_reps = 0
@@ -82,8 +151,13 @@ def main():
             skips_per_day[d] += 1
             continue
         per_day[d] += 1
-        per_ex[r["ex"]] += 1
-        reps_per_ex[r["ex"]] += r["reps"]
+        k = norm_ex(r["ex"])
+        per_ex[k] += 1
+        reps_per_ex[k] += r["reps"]
+        ex_name[k] = clean_ex(r["ex"])
+        secs_per_ex[k] += r["dur"]
+        if r["weight"]:
+            wt_per_ex[k] = r["weight"]   # rows are in order, so the last wins
         per_hour[r["dt"].hour] += 1
         per_where[r["where"]] += 1
         total_reps += r["reps"]
@@ -146,7 +220,29 @@ def main():
             )
         return "".join(out)
 
-    ex_bars = bars(per_ex, lambda k, v: f"{v} ×" + (f" · {reps_per_ex[k]} reps" if reps_per_ex[k] else ""))
+    # Fold normalized keys back to their latest spelling for display.
+    ex_display = Counter()
+    reps_display = Counter()
+    secs_display = Counter()
+    wt_display = {}
+    for k, v in per_ex.items():
+        ex_display[ex_name[k]] += v
+        reps_display[ex_name[k]] += reps_per_ex[k]
+        secs_display[ex_name[k]] += secs_per_ex[k]
+        if wt_per_ex.get(k):
+            wt_display[ex_name[k]] = wt_per_ex[k]
+
+    def ex_meta(k, v):
+        bits = [f"{v} ×"]
+        if reps_display[k]:
+            bits.append(f"{reps_display[k]} reps")
+        if secs_display[k]:
+            bits.append(fmt_dur(secs_display[k]))
+        if wt_display.get(k):
+            bits.append("@ " + fmt_wt(wt_display[k]))
+        return " · ".join(bits)
+
+    ex_bars = bars(ex_display, ex_meta)
 
     hours = Counter({f"{h:02d}:00": per_hour[h] for h in sorted(per_hour)})
     hour_bars = bars(hours)
@@ -158,7 +254,7 @@ def main():
         items = "".join(
             f'<li><span class="t">{r["dt"].strftime("%H:%M")}</span>'
             f'<span class="e">{html.escape(r["ex"])}</span>'
-            f'<span class="m">{"skipped" if r["skip"] else (str(r["reps"]) + " reps" if r["reps"] else "")}'
+            f'<span class="m">{"skipped" if r["skip"] else today_meta(r)}'
             f'{"" if r["where"] == "home" else " · away"}</span></li>'
             for r in todays
         )

@@ -289,11 +289,16 @@ or: $hint"
         ""|"__CANCEL__") note "other: cancelled"; exit 0 ;;
       esac
       line="$typed"
-      record "$line" "$(reps_from_line "$line")" "$where"
-      note "logged (typed): $line"
+      # Splits "10 air squats, 10 pushups" into one record per movement.
+      record_line "$line" "$where" | while IFS= read -r piece; do
+        note "logged (typed): $piece"
+      done
       ;;
     *)  # "Did it"
-      record "$line" "$(reps_from_line "$line")" "$where"
+      # Through record_option, not record: the line on screen may carry an
+      # "@ 50 lb" this tool added, and it belongs in the weight column rather
+      # than glued onto the movement name.
+      line=$(record_option "$line" "$where")
       note "logged: $line"
       ;;
   esac

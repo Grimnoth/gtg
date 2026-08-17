@@ -44,7 +44,10 @@ IGNORE_TITLES=sleep|be in bed|morning duties|dinner|lunch|evening help|time bloc
 ME=you@example.com, Your Name
 
 # THE CORE POOL. Offered every single day, in this order, first preselected.
-# Separate choices with "|". A trailing "xN" is read as the rep count.
+# Separate choices with "|". A trailing "xN" is read as the rep count, a
+# duration ("1 min", "30s") and a weight ("@ 50 lb", "24kg") are read as their
+# own fields, and everything left over is the movement name. You do not have to
+# write the weight here: whatever you used last time is offered automatically.
 #
 # Keep this short. Grease-the-groove works by hitting the same few movements
 # often and well short of failure, so a long menu defeats the point.
