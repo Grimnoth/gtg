@@ -6,8 +6,25 @@ cd "$(dirname "$0")/.."
 REPO=$PWD
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# Fingerprint every live file BEFORE anything runs, and re-check at the end.
+# The overrides below are the primary defence, but a defence you never verify
+# is not a defence -- an earlier "dry run" of backfill rewrote the real log
+# precisely because the override it relied on was silently ignored.
+REAL_HOME=$HOME
+LIVE="$TMP/live-before"
+for f in "$REAL_HOME/.local/state/gtg/log.tsv" \
+         "$REAL_HOME/.local/state/gtg/history.html" \
+         "$REAL_HOME/.local/state/gtg/last-nudge" \
+         "$REAL_HOME/.config/gtg/plan.txt"; do
+  printf '%s\t%s\n' "$f" "$(md5 -q "$f" 2>/dev/null || echo ABSENT)" >>"$LIVE"
+done
+
 export GTG_STATE_DIR="$TMP/state" GTG_CONF_DIR="$TMP/conf"
 mkdir -p "$GTG_STATE_DIR" "$GTG_CONF_DIR"
+# Belt and braces: with HOME redirected, a regression in either override lands
+# in a scratch path instead of the real account.
+export HOME="$TMP/home"
+mkdir -p "$HOME"
 
 pass=0; fail=0
 ok()   { pass=$((pass+1)); printf '  ok   %s\n' "$1"; }
@@ -91,21 +108,66 @@ is "now resolves"  "$(resolve_movement 'sled push')" "sled push"
 plan_add 'sled push x5 @ 90 lb' every; is "duplicate refused (rc 2)" "$?" "2"
 is "and logs"      "$(record_typed 'sled push x5' home)" "sled push x5 @ 90 lb"
 
-echo "== backfill is safe =="
+echo "== backfill never writes the live log =="
 reset_plan
-printf '2026-08-01T10:00:00\tFarmer Walk 1 minute - 100 lbs total\t\thome\n' >"$GTG_STATE_DIR/log.tsv"
-printf '2026-08-01T11:00:00\t10 air squats\t\thome\n' >>"$GTG_STATE_DIR/log.tsv"
-./bin/gtg backfill >/dev/null 2>&1
-is "rows preserved" "$(wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' ')" "2"
-is "weight extracted" "$(awk -F'\t' 'NR==1{print $5}' "$GTG_STATE_DIR/log.tsv")" "100lb"
-is "duration extracted" "$(awk -F'\t' 'NR==1{print $6}' "$GTG_STATE_DIR/log.tsv")" "60"
-# the failure that destroyed a 27-row log and reported success
+printf '2026-08-01T10:00:00\tFarmer Walk 1 minute - 100 lbs total\t\thome\n'  >"$GTG_STATE_DIR/log.tsv"
+printf '2026-08-01T11:00:00\t10 air squats\t\thome\n'                       >>"$GTG_STATE_DIR/log.tsv"
+printf '2026-08-01T12:00:00\tZone 2\t\thome\n'                              >>"$GTG_STATE_DIR/log.tsv"
 cp "$GTG_STATE_DIR/log.tsv" "$TMP/before"
-: >"$GTG_STATE_DIR/log.tsv.bak"; chmod 444 "$GTG_STATE_DIR/log.tsv.bak"
-./bin/gtg backfill >/dev/null 2>&1; rc=$?
-chmod 644 "$GTG_STATE_DIR/log.tsv.bak"
-is "unwritable backup => nonzero exit" "$([ $rc -ne 0 ] && echo yes)" "yes"
-is "unwritable backup => log intact"   "$(cmp -s "$TMP/before" "$GTG_STATE_DIR/log.tsv" && echo yes)" "yes"
+./bin/gtg backfill >/dev/null 2>&1
+is "log itself untouched"   "$(cmp -s "$TMP/before" "$GTG_STATE_DIR/log.tsv" && echo yes)" "yes"
+is "candidate written"      "$([ -f "$GTG_STATE_DIR/log.tsv.migrated" ] && echo yes)" "yes"
+is "candidate keeps rows"   "$(wc -l <"$GTG_STATE_DIR/log.tsv.migrated" | tr -d ' ')" "3"
+is "weight extracted"       "$(awk -F'\t' 'NR==1{print $5}' "$GTG_STATE_DIR/log.tsv.migrated")" "100lb"
+is "duration extracted"     "$(awk -F'\t' 'NR==1{print $6}' "$GTG_STATE_DIR/log.tsv.migrated")" "60"
+is "leading count is reps"  "$(awk -F'\t' 'NR==2{print $3}' "$GTG_STATE_DIR/log.tsv.migrated")" "10"
+# "Zone 2" must keep its name: a trailing bare number is part of the name at
+# least as often as it is a count.
+is "Zone 2 name preserved"  "$(awk -F'\t' 'NR==3{print $2}' "$GTG_STATE_DIR/log.tsv.migrated")" "Zone 2"
+is "Zone 2 reps left empty" "$(awk -F'\t' 'NR==3{print $3}' "$GTG_STATE_DIR/log.tsv.migrated")" ""
+
+# Applying it is your move, and then there is nothing left to do.
+mv "$GTG_STATE_DIR/log.tsv.migrated" "$GTG_STATE_DIR/log.tsv"
+out=$(./bin/gtg backfill 2>&1)
+is "second run is a no-op"  "$(printf '%s' "$out" | grep -c 'nothing to migrate')" "1"
+is "no stale candidate"     "$([ -f "$GTG_STATE_DIR/log.tsv.migrated" ] && echo yes || echo no)" "no"
+
+echo "== CLI WRITE paths =="
+# These exist because they were missing. record_option() was deleted in a
+# refactor and four callers kept calling it; every reader test still passed,
+# because none of them logged anything. Bash printed "command not found", the
+# surrounding echo exited 0, and a nudge would have stamped the slot as used
+# while writing no row. Exercising library functions is not the same as
+# exercising the commands.
+rows() { wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' '; }
+reset_plan
+n0=$(rows); out=$(./bin/gtg 2>&1)
+is "bare gtg wrote a row"    "$(( $(rows) - n0 ))" "1"
+is "bare gtg named it"       "$(printf '%s' "$out" | grep -c 'logged: [a-zA-Z]')" "1"
+is "bare gtg: no not-found"  "$(printf '%s' "$out" | grep -c 'not found')" "0"
+
+n0=$(rows); out=$(./bin/gtg 12 2>&1)
+is "gtg 12 wrote a row"      "$(( $(rows) - n0 ))" "1"
+is "gtg 12 used 12 reps"     "$(awk -F'\t' 'END{print $3}' "$GTG_STATE_DIR/log.tsv")" "12"
+is "gtg 12: no not-found"    "$(printf '%s' "$out" | grep -c 'not found')" "0"
+
+n0=$(rows); out=$(./bin/gtg skip 2>&1)
+is "gtg skip wrote a row"    "$(( $(rows) - n0 ))" "1"
+is "gtg skip marked skip"    "$(awk -F'\t' 'END{print $3}' "$GTG_STATE_DIR/log.tsv")" "skip"
+is "gtg skip: no not-found"  "$(printf '%s' "$out" | grep -c 'not found')" "0"
+
+n0=$(rows); out=$(./bin/gtg "pull-ups x5" 2>&1)
+is "gtg <text> wrote a row"  "$(( $(rows) - n0 ))" "1"
+is "gtg <text>: no not-found" "$(printf '%s' "$out" | grep -c 'not found')" "0"
+
+# Every function the shipped commands reference must actually exist.
+missing=0
+for fn in record record_option record_typed record_new resolve_movement \
+          known_movements plan_add last_weight_for read_piece parse_piece \
+          fmt_piece fmt_dur fmt_wt decorate_weights today_options; do
+  declare -f "$fn" >/dev/null 2>&1 || { missing=$((missing+1)); echo "         missing: $fn"; }
+done
+is "no called function is undefined" "$missing" "0"
 
 echo "== readers run clean =="
 reset_plan
@@ -116,8 +178,15 @@ done
 ./bin/gtg history 30 >/dev/null 2>&1 && ok "gtg history 30" || bad "gtg history 30" "nonzero" "0"
 ./bin/gtg-page --no-open >/dev/null 2>&1 && ok "gtg-page" || bad "gtg-page" "nonzero" "0"
 
-echo "== isolation: the real log was never touched =="
-is "no writes outside the scratch dir" "$(find "$HOME/.local/state/gtg" -newer "$TMP" -name 'log.tsv' 2>/dev/null | wc -l | tr -d ' ')" "0"
+echo "== isolation: nothing live was touched =="
+# Content comparison, not mtime: an mtime threshold moves whenever the suite
+# creates a file, which can hide a write that happened before it.
+mutated=0
+while IFS=$'\t' read -r f want; do
+  now=$(md5 -q "$f" 2>/dev/null || echo ABSENT)
+  [ "$now" = "$want" ] || { mutated=$((mutated+1)); echo "         MUTATED: $f"; }
+done <"$LIVE"
+is "live log, page, stamp and plan all unchanged" "$mutated" "0"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

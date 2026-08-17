@@ -14,7 +14,7 @@ gtg home       count the network you are on now as home
 gtg where      home or away, and why
 gtg skip       record a miss
 gtg add "X"    teach it a new movement (gtg add "swings x10 @ 50 lb" [pool])
-gtg backfill   move weight/duration out of old entry names into their columns
+gtg backfill   propose splitting old entry names into columns (writes nothing)
 gtg today      today's tally
 gtg week       the last 7 days, one line per day
 gtg history    the last 30 days (gtg history 90 for more)
@@ -72,41 +72,56 @@ case "${1:-done}" in
     # and never automatic, because it rewrites the log; the previous file is
     # kept alongside as log.tsv.bak.
     if [ ! -s "$LOG" ]; then echo "nothing logged yet"; exit 0; fi
-    # Every step checked, and the live log replaced only at the very end by an
-    # atomic rename. The first version wrote `awk ... >"$LOG"`, which truncates
-    # the log the instant the redirect opens -- so a failed `cp` left an empty
-    # log AND printed a success line. Verified: it destroyed 27 rows and
-    # reported "backfilled 0 row(s)".
-    cp "$LOG" "$LOG.bak" || { echo "backup failed; log untouched" >&2; exit 1; }
-    rows_before=$(wc -l <"$LOG.bak")
-    tmp="$LOG.tmp.$$"
+    # NEVER writes the live log. It produces a candidate beside it and tells
+    # you to move it yourself.
+    #
+    # This began as an in-place rewrite and each round of review found another
+    # way for that to lose data: a redirect that truncated the log before the
+    # conversion ran, a failed backup reported as success, a nudge answered
+    # mid-migration vanishing between the snapshot and the rename. Those are
+    # not three bugs, they are one design -- a destructive rewrite of the only
+    # copy of your history, to serve a migration you run once. Handing you a
+    # file to inspect and move removes the whole class instead of guarding it.
+    rows_before=$(wc -l <"$LOG")
+    out="$LOG.migrated"
     awk -F'\t' -v OFS='\t' "$AWK_PARSE"'
       {
         ts = $1; ex = $2; reps = $3; where = $4; wt = $5; dur = $6
         parse(ex)
-        # An existing column always wins; this only fills what was empty.
-        if (reps == "") reps = PR
-        if (wt == "") wt = PW
-        if (dur == "") dur = PD
-        if (PN != "" ) ex = PN
+        # Only touch a row when something UNAMBIGUOUS came out of its name: an
+        # explicit "xN", a leading count, a weight, or a duration. A trailing
+        # bare number is part of the name at least as often as it is a count,
+        # so "Zone 2" keeps both its words -- rewriting it to movement "Zone"
+        # with 2 reps would lose a name no backup can tell you was wrong.
+        clear = (ex ~ /[xX][0-9]+/ || ex ~ /^[0-9]+[ \t]/ || PW != "" || PD != "")
+        if (clear) {
+          if (reps == "") reps = PR      # an existing column always wins
+          if (wt   == "") wt   = PW
+          if (dur  == "") dur  = PD
+          if (PN   != "") ex   = PN
+        }
         if (ex != $2 || wt != $5 || dur != $6 || reps != $3) n++
         print ts, ex, reps, where, wt, dur
       }
       END { printf "%d\n", n+0 > "/dev/stderr" }
-    ' "$LOG.bak" >"$tmp" 2>"$STATE_DIR/.backfilled" \
-      || { rm -f "$tmp" "$STATE_DIR/.backfilled"; echo "conversion failed; log untouched" >&2; exit 1; }
-    rows_after=$(wc -l <"$tmp")
+    ' "$LOG" >"$out" 2>"$STATE_DIR/.backfilled" \
+      || { rm -f "$out" "$STATE_DIR/.backfilled"; echo "conversion failed; nothing written" >&2; exit 1; }
+    rows_after=$(wc -l <"$out")
+    changed=$(cat "$STATE_DIR/.backfilled"); rm -f "$STATE_DIR/.backfilled"
     if [ "$rows_after" -ne "$rows_before" ]; then
-      rm -f "$tmp" "$STATE_DIR/.backfilled"
-      echo "row count changed ($rows_before -> $rows_after); log untouched" >&2
+      rm -f "$out"
+      echo "row count changed ($rows_before -> $rows_after); nothing written" >&2
       exit 1
     fi
-    changed=$(cat "$STATE_DIR/.backfilled"); rm -f "$STATE_DIR/.backfilled"
-    diff <(cut -f2-3,5-6 "$LOG.bak") <(cut -f2-3,5-6 "$tmp") \
-      | sed -n 's/^</  was:/p; s/^>/  now:/p' | head -40
-    mv "$tmp" "$LOG"
-    echo "backfilled $changed row(s) of $rows_before; previous log kept at $LOG.bak"
-    "$(dirname "$0")/gtg-page" --no-open >/dev/null 2>&1 || true
+    if [ "$changed" -eq 0 ]; then
+      rm -f "$out"; echo "nothing to migrate: all $rows_before row(s) already split out"; exit 0
+    fi
+    diff <(cut -f2-3,5-6 "$LOG") <(cut -f2-3,5-6 "$out") \
+      | sed -n 's/^</  was:/p; s/^>/  now:/p' | head -60
+    echo
+    echo "$changed of $rows_before row(s) would change. Your log is UNCHANGED."
+    echo "Read the above, then apply it yourself:"
+    echo "  mv $out $LOG"
     ;;
 
   add)

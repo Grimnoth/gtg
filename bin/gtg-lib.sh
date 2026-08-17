@@ -407,10 +407,17 @@ resolve_movement() {
 # something you extend rather than something the parser invents.
 # plan_add "kettlebell swings x10 @ 50 lb" [every|away|mon|...]
 plan_add() {
-  local entry="$1" pool="${2:-every}" cur
+  local entry="$1" pool="${2:-every}" cur tmp
+  # A pool name reaches sed, grep and awk patterns, so it is an allowlist, not
+  # free text. "gtg add x .*" would otherwise match and rewrite every pool line.
+  case "$pool" in
+    every|away|mon|tue|wed|thu|fri|sat|sun) ;;
+    *) echo "unknown pool: $pool (every|away|mon..sun)" >&2; return 1 ;;
+  esac
   entry=$(printf '%s' "$entry" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   [ -n "$entry" ] || return 1
   [ -w "$PLAN" ] || { echo "cannot write $PLAN" >&2; return 1; }
+  tmp="$PLAN.tmp.$$"
   cur=$(plan_line "$pool")
   if [ -n "$cur" ]; then
     # Already there? Compare on the movement key, not the spelling.
@@ -422,15 +429,43 @@ plan_add() {
     fi
     # A pool line already exists: extend it in place.
     awk -v pool="$pool" -v entry="$entry" '
-      $0 ~ "^" pool ":" { print $0 " | " entry; next } { print }' "$PLAN" >"$PLAN.tmp"
+      index($0, pool ":") == 1 { print $0 " | " entry; next } { print }' "$PLAN" >"$tmp"
   elif grep -q "^$pool:" "$PLAN"; then
     awk -v pool="$pool" -v entry="$entry" '
-      $0 ~ "^" pool ":" { print pool ": " entry; next } { print }' "$PLAN" >"$PLAN.tmp"
+      index($0, pool ":") == 1 { print pool ": " entry; next } { print }' "$PLAN" >"$tmp"
   else
-    cp "$PLAN" "$PLAN.tmp" && printf '%s: %s\n' "$pool" "$entry" >>"$PLAN.tmp"
+    cp "$PLAN" "$tmp" && printf '%s: %s\n' "$pool" "$entry" >>"$tmp"
   fi
-  [ -s "$PLAN.tmp" ] || { rm -f "$PLAN.tmp"; echo "refusing to write an empty plan" >&2; return 1; }
-  mv "$PLAN.tmp" "$PLAN"
+  # The producer must have SUCCEEDED, not merely produced bytes: a write that
+  # fails halfway still leaves a nonempty file, and -s alone would rename that
+  # truncated plan over the real one.
+  # shellcheck disable=SC2181
+  if [ $? -ne 0 ] || [ ! -s "$tmp" ] \
+     || [ "$(wc -l <"$tmp")" -lt "$(wc -l <"$PLAN")" ]; then
+    rm -f "$tmp"; echo "plan write failed; plan.txt untouched" >&2; return 1
+  fi
+  mv "$tmp" "$PLAN"
+}
+
+# Log an option the picker already chose, rather than free text you typed.
+#
+# The option line may carry an "@ 50 lb" that decorate_weights put there, so it
+# still has to be taken apart -- otherwise "Did it", the most-used path of all,
+# would write the weight back into the movement NAME.
+#
+# reps_override wins when given (`gtg 12`), and the literal "skip" passes
+# straight through as the reps field. The name is resolved like any other, but
+# falls back to what was parsed: options come from the plan, so they are known
+# by construction, and a nudge must never fail to log because of a lookup.
+record_option() {
+  local line="$1" where="$2" reps="${3:-}" name wt
+  read_piece "$line"
+  [ -n "$P_NAME" ] || return 1
+  name=$(resolve_movement "$P_NAME"); [ -n "$name" ] || name="$P_NAME"
+  wt="$P_WT"; [ -n "$wt" ] || wt=$(last_weight_for "$name")
+  [ -n "$reps" ] && P_REPS="$reps"
+  record "$name" "$P_REPS" "$where" "$wt" "$P_DUR"
+  fmt_piece "$name" "$P_REPS" "$wt" "$P_DUR"
 }
 
 # Log one typed report as ONE set.
@@ -459,7 +494,12 @@ record_new() {
   local text="$1" where="$2" pool="${3:-every}" wt
   read_piece "$text"
   [ -n "$P_NAME" ] || return 1
-  plan_add "$(fmt_piece "$P_NAME" "$P_REPS" "$P_WT" "$P_DUR")" "$pool" || true
+  # 0 added, 2 already there -- both mean the movement is in a pool. Anything
+  # else failed, and recording it after telling you it was added would be a
+  # lie: the set would never be offered again.
+  plan_add "$(fmt_piece "$P_NAME" "$P_REPS" "$P_WT" "$P_DUR")" "$pool"
+  case $? in 0|2) ;; *) return 1 ;; esac
+  read_piece "$text"
   wt="$P_WT"
   record "$P_NAME" "$P_REPS" "$where" "$wt" "$P_DUR"
   fmt_piece "$P_NAME" "$P_REPS" "$wt" "$P_DUR"; printf '\n'

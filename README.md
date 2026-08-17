@@ -164,11 +164,22 @@ Older rows have the weight and duration stranded inside the name. Every reader
 strips them at read time, so nothing looks broken, but the weight in such a row
 cannot be remembered -- it is still just text.
 
-`gtg backfill` re-parses those rows into the real columns. It is opt-in and
-never runs on its own, because it rewrites your data. It copies the log to
-`log.tsv.bak`, builds the new version in a temporary file, refuses to continue
-if the row count changes, and only then replaces the log with an atomic rename.
-Any failure leaves the original untouched.
+`gtg backfill` re-parses those rows and **writes nothing**. It leaves a
+candidate at `log.tsv.migrated`, prints a before/after diff, and tells you the
+`mv` to run if you like what you see.
+
+It began as an in-place rewrite, and every round of review found another way
+for that to lose data: an output redirect that truncated the log before the
+conversion ran, a failed backup reported as success, a nudge answered
+mid-migration vanishing between the snapshot and the rename. Those were not
+three bugs but one design -- destructively rewriting the only copy of your
+history, to serve a migration you run once. Handing you a file to inspect
+removes the whole class rather than guarding each way through it.
+
+It also only touches a row when something **unambiguous** came out of the
+name: an explicit `xN`, a leading count, a weight, or a duration. A trailing
+bare number stays put, so `Zone 2` keeps both its words instead of becoming
+movement `Zone` with 2 reps.
 
 ## Tests
 
@@ -396,7 +407,7 @@ than a reminder system that quietly stops reminding and takes a week to notice.
 | `~/.config/gtg/plan.txt` | Your plan and settings. Yours; never overwritten. |
 | `~/.config/gtg/home-gateway-mac` | Written by `install.sh`. |
 | `~/.local/state/gtg/log.tsv` | The log. `iso8601 · exercise · reps · home\|away · weight · seconds` |
-| `~/.local/state/gtg/log.tsv.bak` | Written by `gtg backfill` before it rewrites anything. |
+| `~/.local/state/gtg/log.tsv.migrated` | A `gtg backfill` proposal. Yours to inspect and move, or delete. |
 | `test/run.sh` | The test suite. Runs against a scratch dir; cannot touch your log. |
 | `~/.local/state/gtg/nudge.log` | What the scheduled job did, and why it skipped. |
 | `~/.local/state/gtg/last-nudge` | Debounce stamp. Delete it to re-arm now. |
