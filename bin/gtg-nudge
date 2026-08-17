@@ -43,28 +43,72 @@ busy_now=no
 starts_soon=no
 ical=$(command -v icalBuddy 2>/dev/null || true)
 if [ -n "$ical" ]; then
-  args=(-nc -nrd -ea -b "" -eep "notes,location,url,attendees,datetime")
+  args=(-nc -nrd -ea -b "" -iep "title,attendees")
   inc=$(cfg BUSY_CALENDARS)
   exc=$(cfg IGNORE_CALENDARS)
   [ -n "$inc" ] && args+=(-ic "$inc")
   [ -n "$exc" ] && args+=(-ec "$exc")
 
-  # Drop routine self-blocks by title. A calendar used for life structure
-  # rather than meetings -- Sleep, Dinner, Morning Duties, Be in Bed -- would
-  # otherwise read as an unbroken wall of meetings and mute most of the day.
-  # With -b "" and datetime excluded, each line is just a title, so this is a
-  # clean match.
   ignore_re=$(cfg IGNORE_TITLES)
-  drop_routine() {
-    if [ -n "$ignore_re" ]; then grep -viE "$ignore_re"; else cat; fi
+  me=$(cfg ME)
+
+  # Keep only the events that are actually appointments with someone.
+  #
+  # icalBuddy prints a title at column 0 and, when the event has them, an
+  # indented "attendees:" continuation line. So this reads two lines per event
+  # and applies two filters:
+  #
+  #   IGNORE_TITLES  drops routine self-blocks by name (Sleep, Dinner, Be in
+  #                  Bed). Left in, a life-structure calendar is an unbroken
+  #                  wall of "meetings" that mutes most of the day.
+  #
+  #   ME             drops anything with no attendee other than you. A block
+  #                  you put on your own calendar -- "Work on X", "General
+  #                  Admin", a webinar you alone RSVP'd to -- is time you
+  #                  chose, not time you owe anybody, and a 30 second set is
+  #                  exactly the interruption it can absorb. Only a second
+  #                  human on the invite buys silence.
+  #
+  # The cost: a real meeting you typed yourself, with nobody invited, reads as
+  # a solo block and gets a banner. That is the trade this whole file already
+  # makes -- a stray banner beats a reminder system that quietly stops.
+  real_commitments() {
+    awk -v ignore="$ignore_re" -v me="$me" '
+      BEGIN {
+        n = split(me, m, ",")
+        for (i = 1; i <= n; i++) {
+          gsub(/^[ \t]+|[ \t]+$/, "", m[i])
+          if (m[i] != "") mine[tolower(m[i])] = 1
+        }
+      }
+      function flush() {
+        if (title == "") return
+        if (with_others && !(ignore != "" && tolower(title) ~ tolower(ignore)))
+          print title
+        title = ""; with_others = 0
+      }
+      /^[[:space:]]*$/ { next }
+      /^[[:space:]]+attendees:/ {
+        sub(/^[[:space:]]*attendees:[[:space:]]*/, "")
+        k = split($0, a, ",")
+        for (i = 1; i <= k; i++) {
+          gsub(/^[ \t]+|[ \t]+$/, "", a[i])
+          if (a[i] != "" && !(tolower(a[i]) in mine)) with_others = 1
+        }
+        next
+      }
+      /^[[:space:]]/ { next }
+      { flush(); title = $0 }
+      END { flush() }
+    '
   }
 
-  out=$("$ical" "${args[@]}" eventsNow 2>/dev/null | drop_routine | grep -v '^[[:space:]]*$' || true)
+  out=$("$ical" "${args[@]}" eventsNow 2>/dev/null | real_commitments || true)
   if [ -n "$out" ]; then
     busy_now=yes
   else
     out=$("$ical" "${args[@]}" eventsFrom:now to:"+$SOON_MINS minutes" 2>/dev/null \
-          | drop_routine | grep -v '^[[:space:]]*$' || true)
+          | real_commitments || true)
     [ -n "$out" ] && starts_soon=yes
   fi
 fi

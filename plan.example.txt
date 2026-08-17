@@ -34,6 +34,15 @@ IGNORE_CALENDARS=Time Tracking,GTG
 # a calendar you otherwise want honored.
 IGNORE_TITLES=sleep|be in bed|morning duties|dinner|lunch|evening help|time block|focus
 
+# Every way your own name appears in an attendee list, comma separated. Only an
+# event with somebody OTHER than you on it counts as a meeting, so a work block
+# you scheduled for yourself still gets nudged -- which is the point, since a
+# 30 second set is exactly the interruption deep work can absorb. Get this
+# wrong and a webinar you alone RSVP'd to reads as a meeting and mutes the hour.
+# Check what your calendar actually reports:
+#   icalBuddy -nc -nrd -ea -b "" -iep "title,attendees" eventsToday
+ME=you@example.com, Your Name
+
 # THE CORE POOL. Offered every single day, in this order, first preselected.
 # Separate choices with "|". A trailing "xN" is read as the rep count.
 #

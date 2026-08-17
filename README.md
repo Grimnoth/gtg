@@ -238,9 +238,34 @@ those mute most of the day. Two knobs, both in `plan.txt`:
 - `IGNORE_TITLES` is a case-insensitive regex for routine blocks that live on a
   calendar you otherwise want honored.
 
-What survives both filters is a real commitment, and only that suppresses a
-nudge. `nudge.log` names the event that caused each skip, so an over-broad
-filter is visible rather than mysterious.
+Surviving both filters is necessary but not sufficient: what is left still has
+to have somebody else on it, per the next section. `nudge.log` names the event
+that caused each skip, so an over-broad filter is visible rather than
+mysterious.
+
+### A work block is not a meeting
+
+Enumerating titles never keeps up, because the blocks that mute a day are the
+ones you invent as you go: `Work on Booty Wars graphics`, `General Admin`,
+`Pay Capital One CC`. The general rule is on the invite, not the title.
+
+**Only an event with somebody other than you on it suppresses a nudge.** Set
+`ME` in `plan.txt` to every form your own name takes in an attendee list, then
+the test is arithmetic: strip yourself out, and if nobody is left it is a block
+you chose rather than an appointment you owe. Deep work absorbs a 30 second
+set; another person's calendar does not.
+
+See what yours actually reports:
+
+```sh
+icalBuddy -nc -nrd -ea -b "" -iep "title,attendees" eventsToday
+```
+
+Two cases worth knowing. An event with **no** `attendees` line at all is solo,
+so a real meeting you typed yourself and invited nobody to will get a banner --
+the same fail-open trade the rest of this file makes. And `ME` matters most for
+the events where you are the *only* invitee: a webinar, a class, a restaurant
+reservation. Get `ME` wrong and those mute the hour.
 
 ## It fails open, on purpose
 
