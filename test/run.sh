@@ -33,8 +33,8 @@ is()   { [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
 
 reset_plan() {
   cat >"$GTG_CONF_DIR/plan.txt" <<'P'
-WAKE_START=6
-WAKE_END=22
+WAKE_START=9
+WAKE_END=21
 STYLE=picker
 every: ring dips x5 | pull-ups x5 | push-ups x20 | kettlebell swings x10
 away: stairs, 2 flights | air squats x20
@@ -278,16 +278,16 @@ is "an out-of-hours fire is logged" \
   "$(./bin/gtg-nudge 2>&1 | grep -c 'outside waking hours')" "1"
 is "  and it wrote no set" "$(wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' ')" "0"
 
-# WAKE_END is exclusive, which is the only reading that makes "nothing after
-# 10pm" true: fires land at :20 and :50, so an inclusive 22 would have let
-# 22:50 through. Both sides of the boundary, tested directly rather than
-# through gtg-nudge, which would open a dialog on the inside case.
-sed -i '' "s/^WAKE_START=.*/WAKE_START=6/; s/^WAKE_END=.*/WAKE_END=22/" \
+# WAKE_END is exclusive: fires land at :20 and :50, so an inclusive 21 would
+# have let 21:50 through, an hour past what the number looks like. Both sides
+# of the boundary, tested directly rather than through gtg-nudge, which would
+# open a dialog on the inside case.
+sed -i '' "s/^WAKE_START=.*/WAKE_START=9/; s/^WAKE_END=.*/WAKE_END=21/" \
   "$GTG_CONF_DIR/plan.txt"
-in_waking_window 5  && bad "05:00 is before the window" "allowed" "skipped" || ok "05:00 is before the window"
-in_waking_window 6  && ok  "06:00 is the first hour"    || bad "06:00 is the first hour" "skipped" "allowed"
-in_waking_window 21 && ok  "21:00 still nudges"         || bad "21:00 still nudges" "skipped" "allowed"
-in_waking_window 22 && bad "22:00 is already out"       "allowed" "skipped" || ok "22:00 is already out"
+in_waking_window 8  && bad "08:00 is before the window" "allowed" "skipped" || ok "08:00 is before the window"
+in_waking_window 9  && ok  "09:00 is the first hour"    || bad "09:00 is the first hour" "skipped" "allowed"
+in_waking_window 20 && ok  "20:00 still nudges"         || bad "20:00 still nudges" "skipped" "allowed"
+in_waking_window 21 && bad "21:00 is already out"       "allowed" "skipped" || ok "21:00 is already out"
 in_waking_window 23 && bad "23:00 is out"               "allowed" "skipped" || ok "23:00 is out"
 
 echo "== readers run clean =="

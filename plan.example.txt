@@ -1,11 +1,14 @@
 # Copied to ~/.config/gtg/plan.txt on first install, then never touched again.
 # Edit that copy, not this one. No reload needed -- every nudge re-reads it.
 
-# The hours a nudge may fire in. WAKE_START is inclusive, WAKE_END is NOT:
-# 6 and 22 mean "nothing before 6am, nothing after 10pm", and because fires
-# land at :20 and :50 the real bounds are a first at 6:20 and a last at 21:50.
-WAKE_START=6
-WAKE_END=22
+# The hours a nudge may fire in. WAKE_START is inclusive, WAKE_END is NOT, so
+# these two mean "nothing before 9am, nothing at or after 9pm". Fires land at
+# :20 and :50, so in practice: first at 9:20, last at 20:50.
+#
+# The exclusive end is why this reads 21 rather than 20 -- under an inclusive
+# rule, 20 bought you until 20:50, an hour past what it looked like.
+WAKE_START=9
+WAKE_END=21
 
 # picker = modal list of the day's options plus "Other..." and "Skip this one"
 #          (default). Pops in front of whatever you are doing and waits, so one

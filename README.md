@@ -372,10 +372,10 @@ one clump after lunch.
 
 At **:50 and :20** past every hour, inside the waking window.
 
-`WAKE_START` is inclusive, `WAKE_END` is **not**. The shipped `6` and `22` mean
-"nothing before 6am, nothing after 10pm", so the first possible fire is **6:20**
-and the last is **21:50**. Read inclusively, `22` would have permitted 22:20 and
-22:50, which is after 10pm by any reading anyone means by it. Both sides of that
+`WAKE_START` is inclusive, `WAKE_END` is **not**. The shipped `9` and `21` mean
+"nothing before 9am, nothing at or after 9pm", so the first possible fire is
+**9:20** and the last is **20:50**. Read inclusively, `21` would have permitted
+21:20 and 21:50, an hour past what the number looks like. Both sides of that
 boundary are tested.
 
 :50 is the real slot. It sits just before the top of the hour, which is where
