@@ -503,25 +503,43 @@ known_movements() {
 # Resolve typed text to a movement this tool already knows. Prints the
 # canonical name, or nothing when it is not a movement we have seen.
 #
-# Exact key first, then an unambiguous prefix, so "kett" finds "kettlebell
-# swings" but a prefix matching two movements finds neither. Both rules are
-# decidable and explainable when they are wrong.
+# Three tiers, each tried only when the one above found nothing, and each
+# requiring exactly ONE candidate:
 #
-# This replaced an edit-distance guess that silently rewrote what you typed.
-# "Incline Press" and "Decline Press" are distance 2 -- exactly the threshold
-# it auto-corrected at -- so two real movements quietly became one, and the
-# log said nothing. A closed set you extend on purpose beats a guess.
+#   1. the exact key
+#   2. an unambiguous prefix    -- "kett" finds "kettlebell swings"
+#   3. an unambiguous substring -- "back stretch" finds "kettlebell back
+#                                  stretch"
+#
+# Tier 3 exists because you name a movement by its distinctive part, not by
+# its full registered name. "kettlebell back stretch" got typed back as
+# "30s back stretch" the same day it was added, and prefix matching cannot
+# see it: the words you left off were at the FRONT.
+#
+# Ambiguity still resolves to nothing, which is the property that matters. If
+# "hamstring stretch" is ever added, "stretch" matches two and therefore
+# matches neither -- and you are asked, rather than told.
+#
+# All three rules are decidable and explainable when they are wrong. This
+# replaced an edit-distance guess that silently rewrote what you typed:
+# "Incline Press" and "Decline Press" are distance 2, exactly the threshold it
+# auto-corrected at, so two real movements quietly became one and the log said
+# nothing. A closed set you extend on purpose beats a guess.
 resolve_movement() {
   [ -n "${1:-}" ] || return 0
   printf '%s\n' "$1" | awk "$AWK_KEY"'{print key($0)}' | {
     read -r want
     [ -n "$want" ] || exit 0
+    # Counted by distinct NAME, not by row: two plan entries for one movement
+    # must not read as an ambiguous pair and cancel each other out.
     known_movements | awk -F'\t' -v want="$want" '
-      $1 == want { exact = $2 }
-      index($1, want) == 1 { pfx[$2]; n++ }
+      $1 == want         { exact = $2 }
+      index($1, want) == 1 { if (!($2 in pre)) { pre[$2]; npre++ } }
+      index($1, want) > 0  { if (!($2 in any)) { any[$2]; nany++ } }
       END {
         if (exact != "") { print exact; exit }
-        if (n == 1) for (p in pfx) print p
+        if (npre == 1) { for (p in pre) print p; exit }
+        if (nany == 1) for (p in any) print p
       }'
   }
 }

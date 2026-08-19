@@ -76,7 +76,16 @@ echo "== resolution: known set, no guessing =="
 is "exact"                "$(resolve_movement 'kettlebell swings')" "kettlebell swings"
 is "unambiguous prefix"   "$(resolve_movement 'kett')"              "kettlebell swings"
 is "unknown stays unknown" "$(resolve_movement 'sled push')"        ""
-is "no edit-distance snap" "$(resolve_movement 'puships')"          ""
+is "no edit-distance snap" "$(resolve_movement 'puships')"        ""
+# You name a movement by its distinctive part, and the words you leave off are
+# often at the FRONT -- "kettlebell back stretch" gets typed as "back stretch".
+# A prefix rule cannot see that, which is why there is a substring tier.
+is "unambiguous substring" "$(resolve_movement 'bell swings')"      "kettlebell swings"
+is "  with a count on it"  "$(resolve_movement 'swings')"           "kettlebell swings"
+# The property that makes the substring tier safe: two candidates resolve to
+# neither, so you are asked rather than told.
+is "ambiguous substring resolves to nothing" "$(resolve_movement 'ups')" ""
+is "exact wins over substring" "$(resolve_movement 'pull-ups')"     "pull-ups"
 
 echo "== no splitting on separators =="
 reset_plan
