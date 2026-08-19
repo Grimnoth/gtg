@@ -26,6 +26,7 @@ gtg where      home or away, and why
 gtg skip       record a miss
 gtg add "X"    teach it a new movement (gtg add "swings x10 @ 50 lb" [pool])
 gtg backfill   propose splitting old entry names into columns (writes nothing)
+gtg nudges     the last 20 fires and what each one did (gtg nudges 50)
 gtg today      today's tally
 gtg week       the last 7 days, one line per day
 gtg history    the last 30 days (gtg history 90 for more)
@@ -71,6 +72,23 @@ case "${1:-done}" in
   help|-h|--help) usage ;;
 
   plan) cat "$PLAN" ;;
+
+  nudges)
+    # "Did one fire while I was not looking?" Every fire leaves a line now,
+    # including the ones that decided to stay quiet, so silence in this list
+    # means the job did not run at all -- which is a different problem with a
+    # different fix.
+    if [ ! -s "$NUDGE_LOG" ]; then echo "no nudges recorded yet"; exit 0; fi
+    tail -n "${2:-20}" "$NUDGE_LOG" | sed 's/^/  /'
+    stamp=$(cat "$STAMP" 2>/dev/null || echo 0)
+    case "$stamp" in ''|*[!0-9]*) stamp=0 ;; esac
+    if [ "$stamp" -gt 0 ]; then
+      echo
+      echo "  last answered:  $(date -r "$stamp" '+%a %H:%M')"
+      printf '  next possible:  %s  (then the first of :20 / :50 after it)\n' \
+        "$(date -r $(( stamp + DEBOUNCE_SECS )) '+%a %H:%M')"
+    fi
+    ;;
 
   when)
     # Dry run for the time parser. Writes nothing -- it is here so "what will

@@ -259,12 +259,32 @@ record_batch 'pull-ups x5; sled push x5; push-ups x20' home >/dev/null 2>&1
 is "an unknown movement rejects the whole round" "$?" "3"
 is "  and writes nothing at all" "$(wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' ')" "0"
 
+echo "== a fire that decides to stay quiet still says so =="
+# The two checks that exit without nudging used to exit silently, so an absent
+# log line meant either "suppressed on purpose" or "the job never ran" and
+# there was no way to tell which. Neither may go quiet again.
+reset_plan
+printf '%s' "$(date +%s)" >"$GTG_STATE_DIR/last-nudge"
+is "a debounced fire is logged" \
+  "$(./bin/gtg-nudge 2>&1 | grep -c 'skip: debounced')" "1"
+
+# A one-hour waking window on the NEXT hour, so the current one is always
+# outside it whatever time the suite runs, midnight included.
+rm -f "$GTG_STATE_DIR/last-nudge"
+w=$(( ($(date +%-H) + 1) % 24 ))
+sed -i '' "s/^WAKE_START=.*/WAKE_START=$w/; s/^WAKE_END=.*/WAKE_END=$w/" "$GTG_CONF_DIR/plan.txt"
+is "an out-of-hours fire is logged" \
+  "$(./bin/gtg-nudge 2>&1 | grep -c 'outside waking hours')" "1"
+is "  and it wrote no set" "$(wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' ')" "0"
+
 echo "== readers run clean =="
 reset_plan
 record_typed 'pull-ups x5' home >/dev/null
-for c in today week stats options plan; do
+# `nudges` must survive an empty nudge log rather than erroring on it.
+for c in today week stats options plan nudges; do
   ./bin/gtg "$c" >/dev/null 2>&1 && ok "gtg $c" || bad "gtg $c" "nonzero" "0"
 done
+./bin/gtg when 8am >/dev/null 2>&1 && ok "gtg when 8am" || bad "gtg when 8am" "nonzero" "0"
 ./bin/gtg history 30 >/dev/null 2>&1 && ok "gtg history 30" || bad "gtg history 30" "nonzero" "0"
 ./bin/gtg-page --no-open >/dev/null 2>&1 && ok "gtg-page" || bad "gtg-page" "nonzero" "0"
 

@@ -10,6 +10,16 @@ PLAN="$CONF_DIR/plan.txt"
 HOME_MAC_FILE="$CONF_DIR/home-gateway-mac"
 STAMP="$STATE_DIR/last-nudge"
 LOG="$STATE_DIR/log.tsv"
+NUDGE_LOG="$STATE_DIR/nudge.log"
+
+# 40 min, against fires 30 min apart -- so answering one nudge suppresses the
+# next slot and the felt cadence is about an hour, which is the point of the
+# whole tool. It also absorbs the burst launchd emits when it replays every
+# slot missed while the Mac slept.
+#
+# Shared rather than living in gtg-nudge, because `gtg nudges` reports when the
+# next nudge becomes possible and must use the same number.
+DEBOUNCE_SECS=2400
 
 mkdir -p "$STATE_DIR" "$CONF_DIR"
 

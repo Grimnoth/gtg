@@ -5,9 +5,10 @@ set -u
 
 . "$(dirname "$0")/gtg-lib.sh"
 
-# 40 min. launchd replays every slot missed while the Mac slept, all at once, so
-# without this a laptop opened after lunch emits a burst of banners.
-DEBOUNCE_SECS=2400
+# DEBOUNCE_SECS lives in gtg-lib.sh: `gtg nudges` has to work out when the next
+# nudge is possible, and a second copy of the number here is a second copy that
+# can drift.
+#
 # How far ahead a meeting still counts as "starting soon".
 SOON_MINS=12
 
@@ -17,16 +18,32 @@ note() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M')" "$*"; }
 
 now=$(date +%s)
 
+# Every path out of this script says why, including the ones that do nothing.
+#
+# These two checks used to exit silently, and they are the two that fire most
+# often -- so "did I miss a nudge five minutes ago?" had no answer in the log.
+# An absent line is indistinguishable from a job that never ran, which is the
+# same ambiguity that once hid twelve broken dialogs for two days. A skip is
+# not nothing happening; it is a decision, and it gets recorded like one.
+#
+# Roughly 48 lines a day, most of them overnight. `gtg nudges` reads them back.
+
 # --- 1. debounce ------------------------------------------------------------
 last=$(cat "$STAMP" 2>/dev/null || echo 0)
 case "$last" in ''|*[!0-9]*) last=0 ;; esac
-if [ $(( now - last )) -lt "$DEBOUNCE_SECS" ]; then exit 0; fi
+if [ $(( now - last )) -lt "$DEBOUNCE_SECS" ]; then
+  note "skip: debounced, $(( (now - last) / 60 )) min since the last nudge (needs $(( DEBOUNCE_SECS / 60 ))); next due $(date -r $(( last + DEBOUNCE_SECS )) '+%H:%M')"
+  exit 0
+fi
 
 # --- 2. waking window -------------------------------------------------------
 wake_start=$(cfg WAKE_START); wake_start=${wake_start:-9}
 wake_end=$(cfg WAKE_END);     wake_end=${wake_end:-20}
 hour=$(date +%-H)
-if [ "$hour" -lt "$wake_start" ] || [ "$hour" -gt "$wake_end" ]; then exit 0; fi
+if [ "$hour" -lt "$wake_start" ] || [ "$hour" -gt "$wake_end" ]; then
+  note "skip: outside waking hours (${wake_start}-${wake_end})"
+  exit 0
+fi
 
 # --- 3. home vs away --------------------------------------------------------
 where=$(where_am_i)

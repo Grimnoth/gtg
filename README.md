@@ -26,6 +26,7 @@ gtg @8am ...   log a set you did earlier (see below)
 gtg when 8am   show how a time would be read, logging nothing
 gtg options    list today's choices
 gtg skip       record a miss
+gtg nudges     the last 20 fires and what each one did
 gtg today      today's tally
 gtg week       the last 7 days, one bar per day
 gtg history    the last 30 days (gtg history 90 for more)
@@ -379,6 +380,27 @@ free hour, so nothing ever double-fires. It earns its keep when a meeting eats
 both of an hour's slots: the next :20 catches you as soon as you are free,
 instead of idling until :50. After such a recovery the cadence may settle on the
 :20 slot for the rest of the day, which is fine. The target is "roughly hourly".
+
+## Every fire says what it did
+
+`gtg nudges` reads back the last 20, and what each one decided:
+
+```
+  2026-08-19 12:21  logged: Farmer Walk 1 min @ 100 lb
+  2026-08-19 12:51  skip: debounced, 30 min since the last nudge (needs 40); next due 13:00
+
+  last answered:  Wed 12:20
+  next possible:  Wed 13:00  (then the first of :20 / :50 after it)
+```
+
+The skip lines matter more than the logged ones. The debounce and the waking
+window used to exit **silently**, so "did I miss a nudge five minutes ago?" had
+no answer: an absent line meant either *suppressed on purpose* or *the job
+never ran*, and nothing distinguished them. That is the same ambiguity that
+once hid twelve broken dialogs for two days. A skip is a decision, not an
+absence of one, so it is recorded like one and the tests hold it there.
+
+Roughly 48 lines a day, most of them overnight.
 
 ## What suppresses a nudge
 
