@@ -169,6 +169,87 @@ for fn in record record_option record_typed record_new resolve_movement \
 done
 is "no called function is undefined" "$missing" "0"
 
+echo "== time parser =="
+# Anchored on yesterday and on offsets from now, never on a bare hour today:
+# "8am" means this morning at 10am and yesterday morning at 7am, so asserting
+# an absolute value for it would make the suite pass or fail by wall clock.
+today=$(date '+%Y-%m-%d'); yest=$(date -v-1d '+%Y-%m-%d')
+is "yesterday + hour"      "$(when_to_iso 'yesterday 7am')"      "${yest}T07:00:00"
+is "leading zero is not octal" "$(when_to_iso 'yesterday 08:00')" "${yest}T08:00:00"
+is "4-digit military"      "$(when_to_iso 'yesterday 0730')"     "${yest}T07:30:00"
+is "12am is midnight"      "$(when_to_iso 'yesterday 12am')"     "${yest}T00:00:00"
+is "12pm is noon"          "$(when_to_iso 'yesterday 12pm')"     "${yest}T12:00:00"
+is "pm adds twelve"        "$(when_to_iso 'yesterday 2:15pm')"   "${yest}T14:15:00"
+is "explicit date"         "$(when_to_iso "$yest 6:30")"         "${yest}T06:30:00"
+is "minutes back from now" "$(when_to_iso '-90m')"    "$(date -v-90M '+%Y-%m-%dT%H:%M:00')"
+is "hours back from now"   "$(when_to_iso '2h ago')"  "$(date -v-2H '+%Y-%m-%dT%H:%M:00')"
+# The one property that must hold for every input: you cannot have already done
+# a set you have not done yet.
+is "23:59 never lands in the future" \
+  "$([ "$(date -j -f '%Y-%m-%dT%H:%M:%S' "$(when_to_iso '23:59')" '+%s')" -le "$(date '+%s')" ] && echo past)" "past"
+is "a bare day is not a time"  "$(when_to_iso "$yest" || echo REJECTED)"  "REJECTED"
+is "impossible hour rejected"  "$(when_to_iso '25:00' || echo REJECTED)"  "REJECTED"
+is "nonsense rejected"         "$(when_to_iso 'banana' || echo REJECTED)" "REJECTED"
+is "empty rejected"            "$(when_to_iso '' || echo REJECTED)"       "REJECTED"
+
+echo "== pulling @time off one line of text =="
+# A dialog has one text field and no quoting, so the time has to be able to
+# span words -- and must not get greedy about it.
+sa() { split_at "$1"; printf '%s|%s' "$AT_ISO" "$AT_REST"; }
+is "one-word time"        "$(sa '@yesterday 7am pull-ups x5')" "${yest}T07:00:00|pull-ups x5"
+is "two-word time"        "$(sa "@$yest 6:30 ring dips x5")"   "${yest}T06:30:00|ring dips x5"
+is "time with no text"    "$(sa '@yesterday 7am')"             "${yest}T07:00:00|"
+is "a round survives it"  "$(sa '@yesterday 7am a; b; c')"     "${yest}T07:00:00|a; b; c"
+# The greedy trap: "7am 10" is not a time, so the count must stay with the
+# movement rather than being swallowed as part of the time.
+is "count is not eaten"   "$(sa '@yesterday 7am 10 ring crunches')" \
+                          "${yest}T07:00:00|10 ring crunches"
+is "no @ means no time"   "$(sa '10 ring crunches')"           "|10 ring crunches"
+is "unreadable time left whole" "$(sa '@banana pull-ups x5')"  "|@banana pull-ups x5"
+is "a bare @ is left whole"     "$(sa '@')"                    "|@"
+
+echo "== backdating =="
+reset_plan
+export GTG_AT="${yest}T07:00:00"
+record_option 'pull-ups x5' home >/dev/null
+unset GTG_AT
+is "the row carries the time given" "$(cut -f1 <"$GTG_STATE_DIR/log.tsv")" "${yest}T07:00:00"
+
+reset_plan
+record_typed 'kettlebell swings x10 @ 50 lb' home >/dev/null
+export GTG_AT="${yest}T07:00:00"
+record_typed 'kettlebell swings x10 @ 20 lb' home >/dev/null
+unset GTG_AT
+is "a backdated set cannot redefine the current weight" \
+  "$(last_weight_for 'kettlebell swings')" "50lb"
+
+echo "== a round typed in one go =="
+reset_plan
+export GTG_AT="${yest}T07:00:00"
+record_batch '10 air squats; pull-ups x5; push-ups x20' home >/dev/null
+unset GTG_AT
+is "three movements, three rows" "$(wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' ')" "3"
+is "  a second apart, so they read back in order" \
+  "$(cut -f1 <"$GTG_STATE_DIR/log.tsv" | paste -sd, -)" \
+  "${yest}T07:00:00,${yest}T07:00:01,${yest}T07:00:02"
+
+reset_plan
+is "pipe separates too" \
+  "$(record_batch 'pull-ups x5 | push-ups x20' home >/dev/null; wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' ')" "2"
+
+# The same rule record_typed has, and for the same reason: the shipped option
+# `stairs, 2 flights` is one movement whose name contains a comma.
+reset_plan
+record_batch 'stairs, 2 flights' away >/dev/null
+is "a comma still does not separate" "$(wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' ')" "1"
+
+# A round typed in one breath must not half-land, leaving you to work out
+# which half made it.
+reset_plan
+record_batch 'pull-ups x5; sled push x5; push-ups x20' home >/dev/null 2>&1
+is "an unknown movement rejects the whole round" "$?" "3"
+is "  and writes nothing at all" "$(wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' ')" "0"
+
 echo "== readers run clean =="
 reset_plan
 record_typed 'pull-ups x5' home >/dev/null

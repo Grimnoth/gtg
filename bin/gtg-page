@@ -111,7 +111,11 @@ def load():
                     "dur": int(dur) if dur.isdigit() else 0,
                 }
             )
-    return rows
+    # By timestamp, not by file order. The log is append-only, so a set logged
+    # after the fact (`gtg @8am ...`) lands at the END of the file with a time
+    # from the MORNING. Without this, Today listed it below sets that happened
+    # hours later.
+    return sorted(rows, key=lambda r: r["dt"])
 
 
 def streaks(days_with_sets, today):

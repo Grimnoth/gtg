@@ -296,12 +296,45 @@ or: $hint"
         ""|"__CANCEL__") note "other: cancelled"; exit 0 ;;
       esac
       line="$typed"
+
+      # The same "@8am ..." prefix the CLI and the menu bar take, so one input
+      # habit works everywhere -- you answer a nudge at ten having done the set
+      # at seven, and it lands at seven.
+      case "$line" in
+        @*)
+          split_at "$line"
+          if [ -n "$AT_ISO" ] && [ -n "$AT_REST" ]; then
+            export GTG_AT="$AT_ISO"; line="$AT_REST"
+            note "backdated to $AT_ISO"
+          else
+            note "no readable time in \"$line\"; logging it as typed"
+          fi ;;
+      esac
+
+      # A round separated by ";" or "|" is several sets, and is all-or-nothing:
+      # confirming a NEW movement mid-round would mean a dialog per movement,
+      # so a round has to be built from movements already known.
+      round=
+      case "$line" in *\;*|*\|*) round=1 ;; esac
+
+      # Falls THROUGH on success, so the debounce stamp below still gets
+      # written -- a logged round is an answered nudge. Only a failure exits
+      # early, unstamped, the same way every other failure here does, so the
+      # next fire tries again rather than counting a rejection as done.
+      if [ -n "$round" ]; then
+        if out=$(record_batch "$line" "$where"); then
+          note "logged (round): $(printf '%s' "$out" | paste -sd';' -)"
+          line=$(printf '%s' "$out" | paste -sd';' -)
+        else
+          note "round rejected, nothing written: an unknown movement in \"$line\""
+          exit 0
+        fi
       # A movement we know is logged straight away. One we do not know is a
       # QUESTION, not a guess -- the old code silently snapped it to whatever
       # known name was within an edit distance of two, which quietly merged
       # "Incline Press" into "Decline Press". Confirming adds it to the pool,
       # so the set of movements is something you extend on purpose.
-      if out=$(record_typed "$line" "$where"); then
+      elif out=$(record_typed "$line" "$where"); then
         note "logged (typed): $out"
       elif [ $? -eq 3 ]; then
         read_piece "$line"

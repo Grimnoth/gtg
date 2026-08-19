@@ -54,6 +54,35 @@ launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 echo "loaded   $LABEL (fires at :20 and :50)"
 
+# --- menu bar (optional) ----------------------------------------------------
+# Hammerspoon rather than a menu bar app of its own, because it was already
+# installed and running here. Skipped entirely when it is not.
+HS_DIR="$HOME/.hammerspoon"
+if [ -d "/Applications/Hammerspoon.app" ]; then
+  mkdir -p "$HS_DIR"
+  cp "$REPO/hammerspoon/gtg.lua" "$HS_DIR/gtg.lua"
+  echo "copied   $HS_DIR/gtg.lua"
+  # One guarded line in init.lua, appended only when it is not already there.
+  # init.lua is yours and has broken itself before, so it is backed up first
+  # and nothing already in it is ever rewritten.
+  if [ -f "$HS_DIR/init.lua" ] && grep -q 'gtg\.lua' "$HS_DIR/init.lua"; then
+    echo "kept     $HS_DIR/init.lua (already loads it)"
+  else
+    [ -f "$HS_DIR/init.lua" ] && cp "$HS_DIR/init.lua" "$HS_DIR/init.lua.bak-gtg"
+    cat >>"$HS_DIR/init.lua" <<'LUA'
+
+-- GTG menu bar (grease-the-groove). Kept in its own file and loaded inside a
+-- pcall so a fault in it cannot take the rest of this config down with it.
+local gtgOk, gtgErr = pcall(dofile, os.getenv("HOME") .. "/.hammerspoon/gtg.lua")
+if not gtgOk then hs.printf("gtg.lua failed to load: %s", tostring(gtgErr)) end
+LUA
+    echo "added    load line to $HS_DIR/init.lua"
+  fi
+  command -v hs >/dev/null 2>&1 && hs -c 'hs.reload()' >/dev/null 2>&1 || true
+else
+  echo "skipped  menu bar (Hammerspoon not installed)"
+fi
+
 # --- dependency -------------------------------------------------------------
 if ! command -v icalBuddy >/dev/null 2>&1; then
   echo

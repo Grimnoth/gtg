@@ -9,6 +9,17 @@ usage() {
 gtg            log today's first option as done
 gtg 12         log 12 reps of that option
 gtg "rows x10" log whatever you actually did
+gtg "a; b; c"  log a whole round, ";" between movements
+
+A leading @time logs a set you did EARLIER, which is the point of it -- a
+round done before you sat down has nowhere else to go:
+
+gtg @8am 10 ring crunches
+gtg @7:15 "pull-ups x5; dead hang 30s"
+gtg @-90m push-ups x20          90 minutes ago
+gtg @"yesterday 6pm" ring dips x5
+gtg when 8am   show how a time would be read, without logging
+
 gtg options    list today's choices
 gtg home       count the network you are on now as home
 gtg where      home or away, and why
@@ -25,6 +36,34 @@ gtg edit       open plan.txt in $EDITOR
 EOF
 }
 
+# A leading "@..." backdates everything after it. Handled once here rather than
+# inside each branch, so it composes with the bare form, a rep count and free
+# text alike -- `gtg @8am`, `gtg @8am 12`, `gtg @8am "pull-ups x5"`.
+if [ $# -gt 0 ] && [ "${1#@}" != "$1" ]; then
+  # The whole command line is handed to split_at as one string, so quoting a
+  # multi-word time is optional and `gtg @yesterday 7am pull-ups x5` works.
+  split_at "$*"
+  if [ -z "$AT_ISO" ]; then
+    echo "could not read a time out of \"$*\"" >&2
+    echo 'try: @8am  @8:00  @14:30  @0730  @-90m  @"yesterday 7am"  @"2026-08-18 6:30"' >&2
+    exit 1
+  fi
+  export GTG_AT="$AT_ISO"
+  # What is left is ONE report. With nothing left, `gtg @8am` logs the day's
+  # first option at eight.
+  if [ -n "$AT_REST" ]; then set -- "$AT_REST"; else set --; fi
+fi
+
+# What a backdated write actually landed on. Printed back on every such log,
+# because that is what makes a deliberately forgiving time parser safe: a
+# misreading is visible in the same breath rather than discovered weeks later
+# in the history page.
+at_note() {
+  [ -n "${GTG_AT:-}" ] || return 0
+  printf '  (logged at %s)' \
+    "$(date -j -f '%Y-%m-%dT%H:%M:%S' "$GTG_AT" '+%a %-d %b, %-I:%M %p' 2>/dev/null || printf '%s' "$GTG_AT")"
+}
+
 where=$(where_am_i)
 line=$(primary_option "$where")
 
@@ -32,6 +71,17 @@ case "${1:-done}" in
   help|-h|--help) usage ;;
 
   plan) cat "$PLAN" ;;
+
+  when)
+    # Dry run for the time parser. Writes nothing -- it is here so "what will
+    # `@8` mean right now?" is answerable without logging a set to find out.
+    if [ -z "${2:-}" ]; then echo 'usage: gtg when 8am' >&2; exit 1; fi
+    if ts=$(when_to_iso "${*:2}"); then
+      date -j -f '%Y-%m-%dT%H:%M:%S' "$ts" '+%a %-d %b %Y, %-I:%M %p'
+    else
+      echo "could not read that as a time" >&2; exit 1
+    fi
+    ;;
 
   options) today_options "$where" ;;
 
@@ -144,7 +194,12 @@ case "${1:-done}" in
     # clean() on the name, not the raw field: rows written before weight and
     # duration had columns still carry them inside the name, and without this
     # a legacy "pull-ups x5" would render as "pull-ups x5 x5".
-    awk -F'\t' -v d="$today" "$AWK_CLEAN$AWK_HUMAN"'
+    #
+    # Sorted, because the log is append-only: a set backdated with `gtg @8am`
+    # sits at the END of the file describing the MORNING, and unsorted it
+    # printed below sets that happened hours after it. ISO timestamps in the
+    # first column make a plain lexicographic sort the right one.
+    sort "$LOG" | awk -F'\t' -v d="$today" "$AWK_CLEAN$AWK_HUMAN"'
       index($1, d) == 1 {
         n++
         if ($3 ~ /^[0-9]+$/) reps += $3
@@ -160,7 +215,7 @@ case "${1:-done}" in
         # "1 min" quietly lost half a minute.
         printf "\n%d set(s)%s%s today\n", n, (reps ? ", " reps " reps" : ""), \
                (secs ? ", " ((secs >= 60 && secs % 60 == 0) ? int(secs/60) " min" : secs "s") : "")
-      }' "$LOG"
+      }' 
     ;;
 
   week)
@@ -216,7 +271,12 @@ case "${1:-done}" in
       $3 != "skip" {
         k = key($2); c[k]++; if ($3 ~ /^[0-9]+$/) r[k] += $3
         if ($6 != "") d[k] += $6     # this branch is already non-skip
-        if ($5 != "") w[k] = $5      # rows are in order, so the last one wins
+        # Latest by TIMESTAMP, file order breaking a tie -- backdating splits
+        # the two apart, and pure file order would let a correction to an old
+        # set redefine the weight shown as current. Same rule as
+        # last_weight_for, tie-break included: a whole round lands inside one
+        # second, so ">" alone would let its first set outrank its last.
+        if ($5 != "" && $1 >= wseen[k]) { wseen[k] = $1; w[k] = $5 }
         name[k] = clean($2)
       }
       $3 == "skip" { k = key($2); sk[k]++; if (!(k in name)) name[k] = clean($2) }
@@ -236,26 +296,23 @@ case "${1:-done}" in
     ;;
 
   done)
-    echo "logged: $(record_option "$line" "$where")  [$where]"
+    echo "logged: $(record_option "$line" "$where")  [$where]$(at_note)"
     ;;
 
   *)
     if printf '%s' "$1" | grep -qE '^[0-9]+$'; then
-      echo "logged: $(record_option "$line" "$where" "$1")  [$where]"
+      echo "logged: $(record_option "$line" "$where" "$1")  [$where]$(at_note)"
     else
-      # Anything else is whatever you actually did: gtg "chin-ups x8".
-      # An unknown movement is a question, not a guess: nothing is recorded
-      # until you say to add it.
-      if out=$(record_typed "$1" "$where"); then
-        echo "logged: $out  [$where]"
-      elif [ $? -eq 3 ]; then
-        read_piece "$1"
-        echo "unknown movement: $P_NAME" >&2
-        echo "add it with:  gtg add \"$(fmt_piece "$P_NAME" "$P_REPS" "$P_WT" "$P_DUR")\"" >&2
-        exit 1
-      else
-        echo "could not read that as a movement" >&2; exit 1
-      fi
+      # Anything else is whatever you actually did: gtg "chin-ups x8", or a
+      # whole round separated by ";". An unknown movement is a question, not a
+      # guess: nothing is recorded until you say to add it.
+      out=$(record_batch "$1" "$where"); rc=$?
+      case "$rc" in
+        0) printf '%s\n' "$out" | sed 's/^/logged: /'
+           echo "        [$where]$(at_note)" ;;
+        3) exit 1 ;;   # record_batch has already named the movement and the fix
+        *) echo "could not read that as a movement" >&2; exit 1 ;;
+      esac
     fi
     ;;
 esac

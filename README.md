@@ -21,6 +21,9 @@ brew install ical-buddy     # optional, enables meeting detection
 gtg            log today's first option as done
 gtg 12         log 12 reps of that option
 gtg "rows x10" log whatever you actually did
+gtg "a; b; c"  log a whole round, ";" between movements
+gtg @8am ...   log a set you did earlier (see below)
+gtg when 8am   show how a time would be read, logging nothing
 gtg options    list today's choices
 gtg skip       record a miss
 gtg today      today's tally
@@ -49,6 +52,82 @@ A modal picker listing the day's options, first one preselected, plus
   the combination, and will ask rather than split it apart on your behalf.
 - **Snooze**, or letting it time out after 15 minutes, deliberately leaves the
   slot unconsumed, so the next fire retries rather than skipping the hour.
+
+## Sets you did before you sat down
+
+The nudge can only ever stamp the moment you answer it, so a round done in the
+kitchen at seven had nowhere to go. A leading `@time` fixes that, and composes
+with every other form:
+
+```sh
+gtg @8am 10 ring crunches
+gtg @7:15 "pull-ups x5; dead hang 30s"     # a whole round at once
+gtg @-90m push-ups x20                     # ninety minutes ago
+gtg @yesterday 6pm ring dips x5             # multi-word times need no quotes
+gtg @8am                                   # the day's first option, at 8
+```
+
+Times are read forgivingly: `8` `8am` `8:00` `08:00` `0800` `8:00am` `2pm`
+`14:30` `-90m` `2h ago` `yesterday 7am` `2026-08-18 6:30`. A bare 1-12 with no
+am/pm means the most recent one that has **already happened**, so at 2pm `@8`
+is this morning and `@1` is an hour ago. Anything still landing in the future
+drops back a day.
+
+What makes a forgiving parser safe is that every backdated log **prints the
+time it resolved to**, so a misreading is visible in the same breath rather
+than discovered weeks later in the history page. `gtg when 8am` answers the
+same question without writing anything.
+
+The same `@time` prefix works in the nudge's **Other…** field and in the menu
+bar, where there is one text field and no quoting -- so the time is allowed to
+span words, and the **longest** leading run that parses wins. That rule is what
+keeps it from getting greedy: in `@yesterday 7am 10 ring crunches` the
+three-word candidate `yesterday 7am 10` is not a time and fails to parse, so
+the count stays with the movement. A parser that guessed rather than failed
+would have silently logged ten o'clock.
+
+`;` and `|` separate movements in a round. A **comma does not** -- the shipped
+option `stairs, 2 flights` is one movement whose name contains one, and
+`clean and press` is why "and" is not a separator either. A round is checked in
+full before a single row is written: it should not half-land because the third
+movement was misspelled, leaving you to work out which half made it.
+
+### The log stays append-only
+
+A backdated row is **appended**, not inserted in date order. Rewriting the only
+copy of your history to serve a convenience is the exact shape of the bug
+`gtg backfill` exists to avoid. Readers that care about order sort at read time
+instead, and "the weight you last lifted" means latest by timestamp -- with file
+order breaking a tie, since a whole round lands inside one second.
+
+## The menu bar
+
+A 🏋 item showing today's count, from `~/.hammerspoon/gtg.lua`:
+
+```
+5 sets today  ·  home
+Did ring dips x5              <- the rotation's pick, one click
+Log something else…
+Log a set I did earlier…      <- takes @8am ... in one field
+Today  >                      <- every set, with times
+History page…
+Refresh
+```
+
+Hammerspoon rather than a menu bar app of its own: it was already installed and
+running here, and this is a face for the `gtg` CLI, not a second implementation
+-- the log format, the rotation and the time parser stay in one place, so the
+menu and the terminal cannot disagree.
+
+It lives in its own file, loaded from `init.lua` inside a `pcall`. That config
+has broken itself once before (`init.lua.broken-2026-08-12`), and a fault in a
+fitness reminder must not be able to take the rest of it down.
+
+**`hs.menubar` methods do not return when driven from the `hs` command line.**
+They are fine in normal operation -- the item builds at load, and the timer
+repaints it -- but `hs -c 'gtgBar.start()'` hangs, which is why `start()` reuses
+its existing item instead of deleting and rebuilding one. Test the menu with
+`hs -c 'return #gtgBar.menu()'`, which does return.
 
 ## The order rotates itself
 

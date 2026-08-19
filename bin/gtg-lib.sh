@@ -293,19 +293,29 @@ read_piece() {
 # This is what makes "kettlebell swings x10" mean the 50 lb bell without saying
 # so. Two sources, in order:
 #
-#   1. what you last actually lifted -- rows are appended in order, so the last
-#      match wins, and changing weight once changes it from then on;
+#   1. what you last actually lifted, so changing weight once changes it from
+#      then on;
 #   2. failing that, the weight written into the plan entry.
 #
 # The plan fallback is what makes a movement usable the moment you add it:
 # `gtg add "sled push x5 @ 90 lb"` should mean 90 lb straight away, not only
 # after you have logged it once with the weight spelled out.
+#
+# "Last" means latest by TIMESTAMP, then last in the file to break a tie. Those
+# were one and the same until backdating arrived: the log is append-only, so
+# `gtg @8am "swings x10 @ 35 lb"` typed this afternoon lands last in the file
+# while describing this morning. Reading it as "what you last lifted" would let
+# a correction to an old set silently redefine the current weight.
+#
+# The tie-break is not a detail: whole rounds land inside one second, so
+# comparing timestamps alone made the FIRST set of a round outrank a heavier
+# one logged moments later. The test suite caught exactly that.
 last_weight_for() {
   local w=""
   if [ -s "$LOG" ]; then
     w=$(awk -F'\t' -v target="$1" "$AWK_KEY"'
       BEGIN { want = key(target) }
-      $3 != "skip" && $5 != "" && key($2) == want { w = $5 }
+      $3 != "skip" && $5 != "" && key($2) == want && $1 >= seen { seen = $1; w = $5 }
       END { if (w != "") print w }
     ' "$LOG")
   fi
@@ -354,10 +364,123 @@ fmt_piece() {
 #
 # The timestamp is the moment you answer, not the moment the nudge fired, so
 # the log reflects when the set actually happened.
+#
+# GTG_AT overrides the timestamp, which is how backdating works: every writer
+# goes through here, so setting it once covers the picker, typed text and
+# batches alike without a new argument on any of them.
+#
+# The log stays APPEND-ONLY even when backdating. Inserting a row in sorted
+# position means rewriting the only copy of your history to serve a
+# convenience, which is the exact shape of the bug `gtg backfill` exists to
+# avoid. Readers that care about order sort at read time instead.
+#
+# GTG_NO_PAGE suppresses the page rebuild so a batch renders once at the end
+# rather than once per movement.
 record() {
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$1" "$2" "$3" "${4:-}" "${5:-}" >>"$LOG"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "${GTG_AT:-$(date '+%Y-%m-%dT%H:%M:%S')}" "$1" "$2" "$3" "${4:-}" "${5:-}" >>"$LOG"
+  [ -n "${GTG_NO_PAGE:-}" ] && return 0
   # Refresh the history page so an already-open tab only needs a reload.
   "$(dirname "$0")/gtg-page" --no-open >/dev/null 2>&1 || true
+}
+
+# Rebuild the history page. Same call record() makes, named so a batch can make
+# it once itself.
+refresh_page() { "$(dirname "$0")/gtg-page" --no-open >/dev/null 2>&1 || true; }
+
+# Turn how a human says a time into a log timestamp. Prints iso8601, or fails.
+#
+# This exists because the sets you most want to record are the ones you did
+# before sitting down: the nudge only ever timestamps the moment you answer it,
+# so a 7am round in the kitchen had nowhere to go.
+#
+#   8  8am  8:00  08:00  0800  8:00am  2pm  14:30      a time today
+#   yesterday 7am    2026-08-18 6:30                   another day
+#   -90m  -2h  45m ago                                 counted back from now
+#
+# A bare 1-12 with no am/pm is read as the most recent one that has already
+# happened, so at 2pm "8" is this morning and "1" is an hour ago. Anything that
+# still lands in the future drops back a day, because a set you have not done
+# yet cannot be logged. Every caller prints the resolved time back, which is
+# what makes a forgiving parser safe: a wrong reading is visible immediately.
+when_to_iso() {
+  local raw n unit day_off=0 datepart="" ampm="" h m base ts
+  raw=$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z' | sed 's/^ *//; s/ *$//; s/  */ /g')
+  [ -n "$raw" ] || return 1
+
+  # Counted back from now: -90m, 2h ago.
+  if printf '%s' "$raw" \
+     | grep -qE '^-?[0-9]+ ?(m|min|mins|minute|minutes|h|hr|hrs|hour|hours)( ago)?$'; then
+    n=$(printf '%s' "$raw" | sed 's/[^0-9]//g')
+    unit=$(printf '%s' "$raw" | sed 's/ago//; s/[0-9 -]//g')
+    case "$unit" in
+      h*) date -v-"${n}"H '+%Y-%m-%dT%H:%M:00' ;;
+      *)  date -v-"${n}"M '+%Y-%m-%dT%H:%M:00' ;;
+    esac
+    return 0
+  fi
+
+  case "$raw" in
+    yesterday*) day_off=1; raw=${raw#yesterday} ;;
+    yest*)      day_off=1; raw=${raw#yest} ;;
+  esac
+  raw=$(printf '%s' "$raw" | sed 's/^ *//')
+
+  # An explicit day in front of the time.
+  if printf '%s' "$raw" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}'; then
+    datepart=${raw%% *}
+    if [ "$datepart" = "$raw" ]; then raw=""; else raw=${raw#* }; fi
+  fi
+  # A day on its own means that day's midnight, which is never what is meant.
+  [ -n "$raw" ] || return 1
+
+  case "$raw" in
+    *am) ampm=am; raw=${raw%am} ;;
+    *a)  ampm=am; raw=${raw%a} ;;
+    *pm) ampm=pm; raw=${raw%pm} ;;
+    *p)  ampm=pm; raw=${raw%p} ;;
+  esac
+  raw=$(printf '%s' "$raw" | sed 's/ *$//')
+
+  case "$raw" in
+    *:*)  h=${raw%%:*}; m=${raw#*:} ;;
+    [0-9][0-9][0-9][0-9]) h=${raw%??}; m=${raw#??} ;;
+    *)    h=$raw; m=0 ;;
+  esac
+  printf '%s' "$h" | grep -qE '^[0-9]{1,2}$' || return 1
+  printf '%s' "$m" | grep -qE '^[0-9]{1,2}$' || return 1
+  # 10# so a leading zero is not read as octal: "08" is eight o'clock, and
+  # without this it is a syntax error.
+  h=$((10#$h)); m=$((10#$m))
+  [ "$m" -le 59 ] || return 1
+
+  case "$ampm" in
+    am) [ "$h" -ge 1 ] && [ "$h" -le 12 ] || return 1; [ "$h" -eq 12 ] && h=0 ;;
+    pm) [ "$h" -ge 1 ] && [ "$h" -le 12 ] || return 1
+        [ "$h" -lt 12 ] && h=$((h + 12)) ;;
+    *)  [ "$h" -le 23 ] || return 1
+        # Ambiguous bare hour, and only when no day was named: prefer the
+        # afternoon reading when it has already happened. 12 is left alone --
+        # it is already noon, and 24 is not an hour.
+        if [ "$day_off" -eq 0 ] && [ -z "$datepart" ] \
+           && [ "$h" -ge 1 ] && [ "$h" -le 11 ]; then
+          ts=$(printf '%sT%02d:%02d:00' "$(date '+%Y-%m-%d')" "$((h + 12))" "$m")
+          if [ "$(date -j -f '%Y-%m-%dT%H:%M:%S' "$ts" '+%s' 2>/dev/null || echo 0)" \
+               -le "$(date '+%s')" ]; then
+            h=$((h + 12))
+          fi
+        fi ;;
+  esac
+
+  if [ -n "$datepart" ]; then base="$datepart"
+  else base=$(date -v-"${day_off}"d '+%Y-%m-%d'); fi
+  ts=$(printf '%sT%02d:%02d:00' "$base" "$h" "$m")
+  date -j -f '%Y-%m-%dT%H:%M:%S' "$ts" '+%s' >/dev/null 2>&1 || return 1
+  # Still ahead of now: it must have been yesterday.
+  if [ "$(date -j -f '%Y-%m-%dT%H:%M:%S' "$ts" '+%s')" -gt "$(date '+%s')" ]; then
+    ts=$(date -j -f '%Y-%m-%dT%H:%M:%S' -v-1d "$ts" '+%Y-%m-%dT%H:%M:00')
+  fi
+  printf '%s' "$ts"
 }
 
 # Every movement this tool knows, as "key<TAB>name", newest spelling last.
@@ -487,6 +610,101 @@ record_typed() {
   wt="$P_WT"; [ -n "$wt" ] || wt=$(last_weight_for "$name")
   record "$name" "$P_REPS" "$where" "$wt" "$P_DUR"
   fmt_piece "$name" "$P_REPS" "$wt" "$P_DUR"; printf '\n'
+}
+
+# Pull a leading "@<time>" off one line of text. Sets AT_ISO and AT_REST.
+#
+# A dialog has ONE text field and no quoting, so the time has to be allowed to
+# span words -- "yesterday 7am", "2026-08-18 6:30", "2h ago". The longest
+# leading run of words that parses as a time wins.
+#
+# Longest-first is what keeps it safe rather than greedy: for
+# "@8am 10 ring crunches" the two-word candidate is "8am 10", which is not a
+# time and does not parse, so it falls back to "8am" and the count stays with
+# the movement. A parser that guessed instead of failing would silently log
+# ten o'clock.
+#
+# Text that merely starts with "@" is left whole, with AT_ISO empty -- the
+# caller decides whether that is an error or just text.
+split_at() {
+  local s="$1" n try rest w
+  AT_ISO=""; AT_REST="$s"
+  case "$s" in @*) ;; *) return 0 ;; esac
+  s=${s#@}
+  for n in 3 2 1; do
+    try=$(printf '%s' "$s" | awk -v n="$n" '
+      { if (NF < n) exit 1
+        out = $1; for (i = 2; i <= n; i++) out = out " " $i
+        print out }') || continue
+    if w=$(when_to_iso "$try"); then
+      rest=$(printf '%s' "$s" | awk -v n="$n" '
+        { out = ""; for (i = n + 1; i <= NF; i++) out = (out == "" ? $i : out " " $i)
+          print out }')
+      AT_ISO="$w"; AT_REST="$rest"
+      return 0
+    fi
+  done
+  return 0
+}
+
+# Log a whole round typed in one go: "10 ring crunches; pull-ups x5; hang 30s".
+#
+# A round done away from the keyboard is remembered as a round, so making you
+# type it one movement per command is the wrong shape -- and the menu bar has
+# exactly one text field to offer.
+#
+# ";" and "|" separate; a COMMA does not. That is not fussiness: the shipped
+# option `stairs, 2 flights` is one movement with a comma in its name, and
+# `clean and press` is why "and" is not a separator either.
+#
+# Checked in FULL before a single row is written. A round typed in one breath
+# should not half-land because the third movement was misspelled, leaving you
+# to work out which half made it.
+#
+# Deliberately no bash arrays. This is /bin/bash, which on macOS is 3.2, and
+# every caller runs under `set -u` -- where ${#arr[@]} on an array that has not
+# been assigned yet aborts the script rather than reading as zero. A validated
+# "name<TAB>piece" line per movement carries the same information with no such
+# edge, since a movement name cannot contain a tab or a newline.
+record_batch() {
+  local text="$1" where="$2" piece name wt base i ts validated=""
+  while IFS= read -r piece; do
+    piece=$(printf '%s' "$piece" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    [ -n "$piece" ] || continue
+    read_piece "$piece"
+    [ -n "$P_NAME" ] || { echo "could not read that as a movement: $piece" >&2; return 1; }
+    name=$(resolve_movement "$P_NAME")
+    if [ -z "$name" ]; then
+      echo "unknown movement: $P_NAME" >&2
+      echo "add it first:  gtg add \"$(fmt_piece "$P_NAME" "$P_REPS" "$P_WT" "$P_DUR")\"" >&2
+      return 3
+    fi
+    validated="$validated$name	$piece
+"
+  done < <(printf '%s\n' "$text" | tr ';|' '\n\n')
+  [ -n "$validated" ] || return 1
+
+  base="${GTG_AT:-}"
+  GTG_NO_PAGE=1
+  i=0
+  while IFS="$(printf '\t')" read -r name piece; do
+    [ -n "$name" ] || continue
+    # One second apart, so a round reads back in the order you did it rather
+    # than in whatever order identical timestamps happen to sort.
+    if [ -n "$base" ]; then
+      ts=$(date -j -f '%Y-%m-%dT%H:%M:%S' -v+"${i}"S "$base" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null)
+      GTG_AT="${ts:-$base}"
+    fi
+    read_piece "$piece"
+    wt="$P_WT"; [ -n "$wt" ] || wt=$(last_weight_for "$name")
+    record "$name" "$P_REPS" "$where" "$wt" "$P_DUR"
+    fmt_piece "$name" "$P_REPS" "$wt" "$P_DUR"; printf '\n'
+    i=$((i + 1))
+  done <<EOF
+$validated
+EOF
+  GTG_AT="$base"; unset GTG_NO_PAGE
+  refresh_page
 }
 
 # Log a typed report for a movement you have just agreed to add.
