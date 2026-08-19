@@ -129,6 +129,22 @@ where_am_i() {
   fi
 }
 
+# True when a nudge may fire in the given hour. Sets WAKE_S / WAKE_E to the
+# bounds it used, so a caller can name them in its log line.
+#
+# WAKE_END is EXCLUSIVE, and that is the whole point. "Nothing after 10pm" is
+# written WAKE_END=22, and the last fire lands at 21:50. Read inclusively, 22
+# would have let 22:20 and 22:50 through -- after 10pm by any reading anyone
+# means by it. WAKE_START stays inclusive, so 6 permits the 6:20 fire.
+#
+# Split out of gtg-nudge so both sides of the boundary can be tested without
+# reaching the part of that script that opens a dialog.
+in_waking_window() {
+  WAKE_S=$(cfg WAKE_START); WAKE_S=${WAKE_S:-6}
+  WAKE_E=$(cfg WAKE_END);   WAKE_E=${WAKE_E:-22}
+  [ "$1" -ge "$WAKE_S" ] && [ "$1" -lt "$WAKE_E" ]
+}
+
 # One plan line by key, options still "|" separated.
 plan_line() { sed -n "s/^$1:[[:space:]]*//p" "$PLAN" 2>/dev/null | head -1; }
 

@@ -370,7 +370,13 @@ one clump after lunch.
 
 ## When it fires
 
-At **:50 and :20** past every hour, inside `WAKE_START`..`WAKE_END`.
+At **:50 and :20** past every hour, inside the waking window.
+
+`WAKE_START` is inclusive, `WAKE_END` is **not**. The shipped `6` and `22` mean
+"nothing before 6am, nothing after 10pm", so the first possible fire is **6:20**
+and the last is **21:50**. Read inclusively, `22` would have permitted 22:20 and
+22:50, which is after 10pm by any reading anyone means by it. Both sides of that
+boundary are tested.
 
 :50 is the real slot. It sits just before the top of the hour, which is where
 most meetings start, so the nudge naturally lands before them rather than during.
@@ -406,9 +412,9 @@ Roughly 48 lines a day, most of them overnight.
 
 | Condition | Behavior |
 | --- | --- |
-| Nudged under 40 min ago | Silent. Stops the burst launchd fires on wake. |
-| Outside the waking window | Silent. |
-| A meeting is in progress | Silent, **and the slot is not consumed**, so the next fire retries. |
+| Nudged under 40 min ago | Logged, with how long since and when the next is due. Stops the burst launchd fires on wake. |
+| Outside the waking window | Logged, with the window it used. |
+| A meeting is in progress | Logged, **and the slot is not consumed**, so the next fire retries. |
 | A macOS Focus is on | macOS drops the banner itself. Nothing we control. |
 
 A meeting *starting* within 12 minutes does not suppress anything. It changes

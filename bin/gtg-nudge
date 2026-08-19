@@ -37,11 +37,8 @@ if [ $(( now - last )) -lt "$DEBOUNCE_SECS" ]; then
 fi
 
 # --- 2. waking window -------------------------------------------------------
-wake_start=$(cfg WAKE_START); wake_start=${wake_start:-9}
-wake_end=$(cfg WAKE_END);     wake_end=${wake_end:-20}
-hour=$(date +%-H)
-if [ "$hour" -lt "$wake_start" ] || [ "$hour" -gt "$wake_end" ]; then
-  note "skip: outside waking hours (${wake_start}-${wake_end})"
+if ! in_waking_window "$(date +%-H)"; then
+  note "skip: outside waking hours (${WAKE_S}:00 until ${WAKE_E}:00)"
   exit 0
 fi
 
