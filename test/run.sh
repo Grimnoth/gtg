@@ -319,8 +319,11 @@ $D 02:20  skip: outside waking hours (9:00 until 21:00)
 $D 09:20  logged (typed): Pull-Ups x5
 $D 09:20  nudged (home): Pull Ups x5
 $D 09:50  skip: debounced, 30 min since the last nudge (needs 40); next due 10:00
+$D 10:20  seen: Google Chrome: Meet – abc-defg-hij - Google Chrome
 $D 10:20  snoozed
+$D 11:05  seen: no meeting window
 $D 11:05  no answer (dismissed itself after 900s)
+$D 11:26  seen: hs did not answer in 8s
 $D 11:26  unknown movement declined: 5x Pull Ups
 $D 12:00  catch-up shown (unlocked after 3h)
 $D 12:01  catch-up done: 2 logged
@@ -333,6 +336,9 @@ is "no answer share"         "$(printf '%s\n' "$fires" | grep -cE 'no answer +1 
 is "refused share"           "$(printf '%s\n' "$fires" | grep -cE 'refused +1 +25%')" "1"
 is "skips summarized"        "$(printf '%s\n' "$fires" | grep -c '1 outside hours, 1 debounced, 0 in a meeting')" "1"
 is "catch-ups counted"       "$(printf '%s\n' "$fires" | grep -c 'catch-up: 1 shown, 2 sets logged')" "1"
+# The observed meeting signal, counted against what happened next. A "seen:"
+# that names a window counts; "no meeting window" and an hs failure do not.
+is "call window cross-tab"   "$(printf '%s\n' "$fires" | grep -c 'with a call window open: 1 shown, 0 logged')" "1"
 is "by hour: 11 shows two"   "$(printf '%s\n' "$fires" | awk '/^  hour/{for(i=2;i<=NF;i++)if($i=="11")c=i} /^  shown/{print $c}')" "2"
 
 # `gtg note` is how the menu bar records a catch-up into the same log the

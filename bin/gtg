@@ -254,6 +254,9 @@ case "${1:-done}" in
       rest ~ /^skip:/              { sx++; next }
       rest ~ /^catch-up shown/     { cs++; next }
       rest ~ /^catch-up done: /    { split(rest, a, " "); cl += a[3]; next }
+      # What was on screen when the dialog opened. A call window is the
+      # candidate meeting signal, observed here before it suppresses anything.
+      rest ~ /^seen: /             { mw = (rest ~ /^seen: (no meeting window|hs )/) ? 0 : 1; next }
       rest ~ /^logged/             { o = "logged" }
       rest ~ /^snoozed/            { o = "snoozed" }
       rest ~ /^no answer/          { o = "no answer" }
@@ -263,7 +266,8 @@ case "${1:-done}" in
       o != "" {
         c[o]++; total++; shown[h]++
         if (o == "logged") lg[h]++
-        o = ""
+        if (mw) { m_shown++; if (o == "logged") m_logged++ }
+        o = ""; mw = 0
       }
       END {
         printf "last %d days: %d nudges shown\n", days, total
@@ -280,6 +284,7 @@ case "${1:-done}" in
         if (sx) printf ", %d other", sx
         printf "\n"
         printf "  catch-up: %d shown, %d sets logged\n", cs, cl
+        printf "  with a call window open: %d shown, %d logged\n", m_shown, m_logged
         if (total == 0) exit
         l1 = "  hour    "; l2 = "  shown   "; l3 = "  logged  "
         for (h = ws; h < we; h++) {

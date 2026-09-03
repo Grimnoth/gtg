@@ -158,6 +158,34 @@ speak=$(cfg SPEAK)
 # next one is due and two can never share the screen.
 DIALOG_TIMEOUT=$(cfg DIALOG_TIMEOUT); DIALOG_TIMEOUT=${DIALOG_TIMEOUT:-900}
 
+# --- what is on screen: observed, written down, not yet acted on ------------
+# The calendar check above never fired once in its first three weeks, and the
+# microphone is no signal on this Mac (Wispr Flow holds it open to dictate).
+# So each fire asks Hammerspoon whether a call window is open and records the
+# answer beside what Ben then did. `gtg fires` counts the two together, and
+# only a week of that earns this line the right to suppress a nudge.
+#
+# Fails open three ways: no hs binary, hs not answering within the deadline,
+# or any error at all. The nudge fires regardless, with "seen:" saying why.
+HS=$(command -v hs 2>/dev/null || true)
+[ -n "$HS" ] || [ ! -x /opt/homebrew/bin/hs ] || HS=/opt/homebrew/bin/hs
+seen="hs not installed"
+if [ -n "$HS" ]; then
+  seen_out=$(mktemp)
+  "$HS" -c 'return gtgBar.meetingWindow()' >"$seen_out" 2>/dev/null &
+  hs_pid=$!
+  # Polled rather than `timeout`, which launchd's PATH does not carry.
+  for _ in 1 2 3 4 5 6 7 8; do kill -0 "$hs_pid" 2>/dev/null || break; sleep 1; done
+  if kill -0 "$hs_pid" 2>/dev/null; then
+    kill "$hs_pid" 2>/dev/null; seen="hs did not answer in 8s"
+  else
+    seen=$(grep -v '^-- ' "$seen_out" | head -1)
+    seen=${seen:-no meeting window}
+  fi
+  rm -f "$seen_out"
+fi
+note "seen: $seen"
+
 # One dialog at a time. `choose from list` cannot time itself out, so without
 # this an unanswered dialog would sit forever holding the lock and mute every
 # later nudge -- the same silent death the banner already died once.

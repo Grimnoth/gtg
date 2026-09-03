@@ -551,6 +551,30 @@ the same fail-open trade the rest of this file makes. And `ME` matters most for
 the events where you are the *only* invitee: a webinar, a class, a restaurant
 reservation. Get `ME` wrong and those mute the hour.
 
+## The calendar is the wrong signal, so a better one is on probation
+
+The calendar check never fired once in its first three weeks. The work calendar
+was never synced into macOS Calendar, and it belongs to an employer, so a signal
+built on it expires with the job. The microphone is no better on this Mac:
+Wispr Flow holds it open whenever a sentence is dictated.
+
+What the machine actually knows is its window list. Zoom names a live call
+`Zoom Meeting`, a Google Meet tab is titled `Meet – ...`, Slack names a
+huddle. `gtgBar.meetingWindow()` in the Hammerspoon file returns the first
+such title, and every fire writes what it saw:
+
+```
+  2026-09-04 10:20  seen: Google Chrome: Meet – abc-defg-hij
+  2026-09-04 10:20  snoozed
+```
+
+It suppresses **nothing yet**. `gtg fires` counts the sightings against what
+happened next, as `with a call window open: N shown, M logged`. A week of that
+says whether the signal is honest, and only then does it earn the right to
+mute a nudge. A Meet in a background tab is invisible to it, since a browser
+window carries its active tab's title, and the same week will show whether
+that matters.
+
 ## It fails open, on purpose
 
 No icalBuddy, a refused calendar grant, a bad calendar name, a broken query: all

@@ -147,6 +147,49 @@ local function onPower(ev)
   end
 end
 
+-- Is a call on screen? The calendar was the meeting signal and it never fired
+-- once in three weeks, and the microphone is no use here: Wispr Flow holds it
+-- open whenever Ben dictates. The window list is what the machine actually
+-- knows. Apps name a live call in their window title, so this returns the
+-- first such title, or "".
+--
+-- OBSERVED, not yet acted on: gtg-nudge writes what this saw into the nudge
+-- log at every fire, and `gtg fires` counts it against what Ben then did.
+-- Only after a week of that does it get to suppress anything.
+--
+-- ponytail: a Meet in a BACKGROUND tab is invisible, since a browser window
+-- is titled by its active tab. The observation week will show whether that
+-- matters.
+--   hs -c 'return gtgBar.meetingWindow()'
+local MEETING = {
+  { app = "^zoom%.us$",        title = "^Zoom Meeting" },
+  { app = "^zoom%.us$",        title = "^Zoom Webinar" },
+  { app = "Microsoft Teams",   title = "Meeting" },
+  { app = "Microsoft Teams",   title = "Call" },
+  { app = "^Slack$",           title = "Huddle" },
+  -- Google Meet, any browser. Lua patterns are byte-wise and the en dash is
+  -- three bytes, hence the + rather than a single class match.
+  { app = ".",                 title = "^Meet [-–]+ " },
+  { app = ".",                 title = "Google Meet" },
+}
+-- Pure, so the patterns can be checked without a call open:
+--   hs -c 'return gtgBar.meetingMatch("zoom.us", "Zoom Meeting")'
+function M.meetingMatch(app, title)
+  for _, m in ipairs(MEETING) do
+    if app:match(m.app) and title:match(m.title) then return true end
+  end
+  return false
+end
+function M.meetingWindow()
+  for _, w in ipairs(hs.window.allWindows()) do
+    local a = w:application()
+    local app = a and a:name() or ""
+    local t = w:title() or ""
+    if M.meetingMatch(app, t) then return app .. ": " .. t end
+  end
+  return ""
+end
+
 -- Where a complaint goes while it is still fresh. The next iteration of the
 -- tool is chosen from these.
 local function friction()
