@@ -366,6 +366,11 @@ for s in 'Pull-Ups x5' 'Bulgarian "split" squats x10 @ 20 lb'; do
     bad "calendar script compiles: $s" "$(head -1 "$TMP/cal.err")" "clean compile"
   fi
 done
+# The write outlives the nudge, and launchd kills a job's leftover children
+# unless the plist says not to. A set logged from a nudge reached the log and
+# never the calendar, with nothing in the nudge log, until this key existed.
+is "launchd lets the calendar write outlive the nudge" \
+  "$(grep -A1 AbandonProcessGroup launchd/com.grimnoth.gtg.plist | grep -c '<true/>')" "1"
 is "the event carries the set's own time" \
   "$(calendar_script GTG 'Pull-Ups x5' '2026-09-03T07:15:00' home | grep -c 'set hours of d to 7$')" "1"
 # The rows the sync feeds the calendar. A timed set has an EMPTY reps column,

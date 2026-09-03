@@ -133,6 +133,15 @@ A failed write is named in the nudge log, never swallowed. Put the same name
 in `IGNORE_CALENDARS` so the nudge does not read its own sets back as
 meetings.
 
+The first set logged from a real nudge reached the log and never the
+calendar, and the nudge log said nothing. The write runs in the background
+and outlives the nudge by seven seconds, and launchd kills every process left
+in a job's group when the main one exits, by SIGKILL, which leaves no error
+to record. `AbandonProcessGroup` in the plist is the fix, and it was
+measured before it was trusted: two throwaway jobs, one with the key and one
+without, and only one child survived. Re-run `install.sh` after pulling this
+so the loaded job carries it.
+
 ## The menu bar
 
 A 🏋 item showing today's count and spread, `🏋 3 · 2/5h` meaning three sets

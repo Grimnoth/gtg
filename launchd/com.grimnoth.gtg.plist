@@ -25,6 +25,15 @@
   <!-- No RunAtLoad: it would fire a banner at every login, and the debounce
        would then suppress the real nudge. -->
 
+  <!-- The calendar write runs in the background and outlives the nudge by
+       about seven seconds. Without this key launchd kills every process left
+       in the job's group the moment the main one exits, so the event never
+       reached the calendar and, being a SIGKILL, left no error to log.
+       Measured 2026-09-03 with two throwaway jobs: default, child killed;
+       with this key, child survived. -->
+  <key>AbandonProcessGroup</key>
+  <true/>
+
   <key>StandardOutPath</key>
   <string>__HOME__/.local/state/gtg/nudge.log</string>
   <key>StandardErrorPath</key>
