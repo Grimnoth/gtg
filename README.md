@@ -27,7 +27,9 @@ gtg when 8am   show how a time would be read, logging nothing
 gtg options    list today's choices
 gtg skip       record a miss
 gtg nudges     the last 20 fires and what each one did
-gtg today      today's tally
+gtg fires      what became of every nudge in the last 14 days
+gtg friction "X"  jot what got in the way, in the moment
+gtg today      today's tally, and which waking hours got a set
 gtg week       the last 7 days, one bar per day
 gtg history    the last 30 days (gtg history 90 for more)
 gtg stats      totals by exercise, all time
@@ -58,11 +60,19 @@ A modal picker listing the day's options, first one preselected, plus
 
 The nudge can only ever stamp the moment you answer it, so a round done in the
 kitchen at seven had nowhere to go. A leading `@time` fixes that, and composes
-with every other form:
+with every other form.
+
+And the menu bar **asks**. Most mornings hold two or three sets before the
+first unlock, and the log showed almost none of them: by the time the computer
+was open they were forgotten. So the first unlock after two hours away, or
+after a night, opens a box titled "Before you sat down?". Each line is one
+`@time ...` entry, and it asks again until you say that is all. Every showing
+is stamped into the nudge log, so `gtg fires` reports how much it catches.
 
 ```sh
 gtg @8am 10 ring crunches
 gtg @7:15 "pull-ups x5; dead hang 30s"     # a whole round at once
+gtg @7:15 "10x bulgarian split squats"    # count first is fine too
 gtg @-90m push-ups x20                     # ninety minutes ago
 gtg @yesterday 6pm ring dips x5             # multi-word times need no quotes
 gtg @8am                                   # the day's first option, at 8
@@ -103,13 +113,15 @@ order breaking a tie, since a whole round lands inside one second.
 
 ## The menu bar
 
-A 🏋 item showing today's count, from `~/.hammerspoon/gtg.lua`:
+A 🏋 item showing today's count and spread, `🏋 3 · 2/5h` meaning three sets
+and two of the five waking hours so far got one, from `~/.hammerspoon/gtg.lua`:
 
 ```
 5 sets today  ·  home
 Did ring dips x5              <- the rotation's pick, one click
 Log something else…
-Log a set I did earlier…      <- takes @8am ... in one field
+Log what I did before sitting down…   <- @8am ... one box per set, asks again
+Something got in the way…     <- a friction note, stamped with the context
 Today  >                      <- every set, with times
 History page…
 Refresh
@@ -172,6 +184,18 @@ weight or run `gtg edit`.
 Typing something it does not know gets you an offer to add it -- one button in
 the dialog, or the exact `gtg add` line on the command line. Nothing is
 recorded until you say yes.
+
+That button did not exist for its first three weeks. The script that builds
+the "Add it?" box had its quote marks mangled on the way to osascript, which
+rejected it and printed nothing, and nothing was recorded as "declined". Fifteen
+declines in the log, none of them a person. The test suite now compiles every
+dialog script with `osacompile`, and a prompt that fails to display logs as
+exactly that rather than as a choice you made.
+
+The count can come first. `20x push ups`, `8 x ring dips` and `push ups x20`
+are one shape, because the first is how it actually gets typed: twelve of the
+first twenty-three refused entries were that and nothing else. A trailing
+period is dropped for the same reason.
 
 ### Why it asks instead of guessing
 
@@ -407,6 +431,32 @@ once hid twelve broken dialogs for two days. A skip is a decision, not an
 absence of one, so it is recorded like one and the tests hold it there.
 
 Roughly 48 lines a day, most of them overnight.
+
+### What becomes of them
+
+`gtg fires` reads the same log back as a table, because the question that
+matters is not "did it fire" but "what did I do when it did":
+
+```
+last 21 days: 387 nudges shown
+  logged        69   18%
+  snoozed       96   25%
+  no answer    200   52%
+  refused       18    5%
+  skipped: 357 outside hours, 39 debounced, 0 in a meeting
+  catch-up: 0 shown, 0 sets logged
+
+  hour     09 10 11 12 13 14 15 16 17 18 19 20
+  shown    26 35 28 34 30 31 29 36 32 26 35 36
+  logged    7 11  7  9  8  5  5  2  5  4  3  3
+```
+
+That is the real baseline, 2026-09-03. Half of all dialogs sat for fifteen
+minutes and dismissed themselves. Mornings log one fire in four, evenings one
+in nine. Zero meeting skips in three weeks means the work calendar is not
+synced into macOS Calendar, not that there were no meetings. Each change to
+this tool from here is judged against this table, and `gtg friction` is where
+the reasons behind the numbers get written down while they are fresh.
 
 ## What suppresses a nudge
 

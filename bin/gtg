@@ -27,7 +27,10 @@ gtg skip       record a miss
 gtg add "X"    teach it a new movement (gtg add "swings x10 @ 50 lb" [pool])
 gtg backfill   propose splitting old entry names into columns (writes nothing)
 gtg nudges     the last 20 fires and what each one did (gtg nudges 50)
-gtg today      today's tally
+gtg fires      what became of every nudge in the last 14 days (gtg fires 30)
+gtg note "X"   stamp a line into the nudge log (the menu bar's catch-up uses it)
+gtg friction "X"  jot what got in the way, in the moment; bare, lists them
+gtg today      today's tally, and which waking hours got a set
 gtg week       the last 7 days, one line per day
 gtg history    the last 30 days (gtg history 90 for more)
 gtg stats      totals by exercise, all time
@@ -206,9 +209,93 @@ case "${1:-done}" in
     esac
     ;;
 
+  note)
+    # The menu bar's catch-up prompt records what it did here, so `fires`
+    # reads nudges and catch-ups from one log.
+    if [ -z "${2:-}" ]; then echo 'usage: gtg note "text"' >&2; exit 1; fi
+    note "${*:2}" >>"$NUDGE_LOG"
+    echo "noted"
+    ;;
+
+  friction)
+    # Where a complaint goes while it is still fresh. The next iteration of
+    # this tool is chosen from these, so the note carries the context that
+    # explains it: where you were and how the day was going.
+    FRICTION="$STATE_DIR/friction.log"
+    if [ -n "${2:-}" ]; then
+      printf '%s  [%s, %s sets today]  %s\n' "$(date '+%Y-%m-%d %H:%M')" \
+        "$where" "$(sets_today)" "${*:2}" >>"$FRICTION"
+      echo "noted ($(wc -l <"$FRICTION" | tr -d ' ') so far; gtg friction lists them)"
+    elif [ -s "$FRICTION" ]; then
+      sed 's/^/  /' "$FRICTION"
+    else
+      echo "no friction notes yet"
+    fi
+    ;;
+
+  fires)
+    # `nudges` answers "what happened just now"; this answers "what happens
+    # in general". Half of all dialogs were dismissing themselves after 15
+    # minutes for three weeks before anyone counted, which is why it exists.
+    #
+    # Only OUTCOME lines count as a dialog shown. The "nudged (home): ..."
+    # stamp that follows a logged set is the same fire, not a second one.
+    days=${2:-14}
+    if [ ! -s "$NUDGE_LOG" ]; then echo "no nudges recorded yet"; exit 0; fi
+    waking_bounds
+    since=$(date -v-"$(( days - 1 ))"d '+%Y-%m-%d')
+    awk -v since="$since" -v days="$days" -v ws="$WAKE_S" -v we="$WAKE_E" '
+      substr($1, 1, 10) < since { next }
+      { h = substr($2, 1, 2); rest = substr($0, 19) }
+      rest ~ /^nudged \(/          { next }
+      rest ~ /^skip: outside/      { so++; next }
+      rest ~ /^skip: debounced/    { sd++; next }
+      rest ~ /^skip: in a meeting/ { sm++; next }
+      rest ~ /^skip:/              { sx++; next }
+      rest ~ /^catch-up shown/     { cs++; next }
+      rest ~ /^catch-up done: /    { split(rest, a, " "); cl += a[3]; next }
+      rest ~ /^logged/             { o = "logged" }
+      rest ~ /^snoozed/            { o = "snoozed" }
+      rest ~ /^no answer/          { o = "no answer" }
+      rest ~ /^other: cancelled/   { o = "cancelled" }
+      rest ~ /^(unknown movement|round rejected|could not read)/ { o = "refused" }
+      rest ~ /^ERROR/              { o = "error" }
+      o != "" {
+        c[o]++; total++; shown[h]++
+        if (o == "logged") lg[h]++
+        o = ""
+      }
+      END {
+        printf "last %d days: %d nudges shown\n", days, total
+        # The first four always print, so a zero is visible as a zero. The
+        # last two only when they happened.
+        want[1] = "logged"; want[2] = "snoozed"; want[3] = "no answer"
+        want[4] = "refused"; want[5] = "cancelled"; want[6] = "error"
+        for (i = 1; i <= 6; i++) {
+          o = want[i]
+          if (c[o] == 0 && i > 4) continue
+          printf "  %-12s %3d  %3d%%\n", o, c[o], (total ? int(c[o] * 100 / total + 0.5) : 0)
+        }
+        printf "  skipped: %d outside hours, %d debounced, %d in a meeting", so, sd, sm
+        if (sx) printf ", %d other", sx
+        printf "\n"
+        printf "  catch-up: %d shown, %d sets logged\n", cs, cl
+        if (total == 0) exit
+        l1 = "  hour    "; l2 = "  shown   "; l3 = "  logged  "
+        for (h = ws; h < we; h++) {
+          k = sprintf("%02d", h)
+          l1 = l1 sprintf(" %2s", k)
+          l2 = l2 sprintf(" %2s", (shown[k] ? shown[k] : "."))
+          l3 = l3 sprintf(" %2s", (lg[k] ? lg[k] : "."))
+        }
+        print ""; print l1; print l2; print l3
+      }' "$NUDGE_LOG"
+    ;;
+
   today)
     today=$(date '+%Y-%m-%d')
     if [ ! -s "$LOG" ]; then echo "nothing logged yet"; exit 0; fi
+    waking_bounds
     # clean() on the name, not the raw field: rows written before weight and
     # duration had columns still carry them inside the name, and without this
     # a legacy "pull-ups x5" would render as "pull-ups x5 x5".
@@ -217,9 +304,11 @@ case "${1:-done}" in
     # sits at the END of the file describing the MORNING, and unsorted it
     # printed below sets that happened hours after it. ISO timestamps in the
     # first column make a plain lexicographic sort the right one.
-    sort "$LOG" | awk -F'\t' -v d="$today" "$AWK_CLEAN$AWK_HUMAN"'
+    sort "$LOG" | awk -F'\t' -v d="$today" -v ws="$WAKE_S" -v we="$WAKE_E" \
+        -v nowh="$(date +%-H)" "$AWK_CLEAN$AWK_HUMAN"'
       index($1, d) == 1 {
         n++
+        if ($3 != "skip") hh[substr($1, 12, 2) + 0]++
         if ($3 ~ /^[0-9]+$/) reps += $3
         # A skipped set contributes no time. Totalling its duration counted a
         # miss as work done.
@@ -229,10 +318,23 @@ case "${1:-done}" in
       }
       END {
         if (n == 0) { print "  nothing yet today"; exit }
+        # Grease-the-groove lives on SPREAD, not on the count: ten sets in one
+        # clump after lunch is a workout, not the method. One cell per waking
+        # hour: # got a set, . passed empty, - still ahead.
+        l1 = "  "; l2 = "  "; cov = 0; sofar = 0
+        for (h = ws; h < we; h++) {
+          l1 = l1 sprintf("%02d ", h)
+          if (h > nowh) mark = "-"
+          else { sofar++; if (h in hh) { mark = "#"; cov++ } else mark = "." }
+          l2 = l2 " " mark " "
+        }
+        print ""; print l1; print l2
         # Whole minutes only, the same rule fmt_dur uses: 90s totalled as
         # "1 min" quietly lost half a minute.
-        printf "\n%d set(s)%s%s today\n", n, (reps ? ", " reps " reps" : ""), \
-               (secs ? ", " ((secs >= 60 && secs % 60 == 0) ? int(secs/60) " min" : secs "s") : "")
+        printf "\n%d set(s)%s%s today, in %d of %d waking hours so far\n", n, \
+               (reps ? ", " reps " reps" : ""), \
+               (secs ? ", " ((secs >= 60 && secs % 60 == 0) ? int(secs/60) " min" : secs "s") : ""), \
+               cov, sofar
       }' 
     ;;
 

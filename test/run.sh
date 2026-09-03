@@ -59,7 +59,16 @@ is "mixed case units"           "$(p 'Farmer Walk 1 Minute - 100 LBS Total')" "F
 is "metres are not minutes"     "$(p '400m sprint')"                          "400m sprint|||"
 
 echo "== movement identity (key) =="
+# The shape Ben actually types. Twelve of the first twenty-three refused
+# entries in the live nudge log were "20x Push Ups": count first, then x.
+is "count-x prefix"             "$(p '20x Push Ups')"                    "Push Ups|20||"
+is "count-x with a weight"      "$(p '12x Kettlebell Swings 50lb')"      "Kettlebell Swings|12|50lb|"
+is "count-x with a space"       "$(p '8 x ring dips')"                   "ring dips|8||"
+is "trailing period dropped"    "$(p 'kettlebell walk.')"                "kettlebell walk|||"
+is "no x eaten from a name"     "$(p 'box jumps x5')"                    "box jumps|5||"
+
 k() { printf '%s\n' "$1" | awk "$AWK_KEY"'{print key($0)}'; }
+is "count-x does not fork"           "$(k '20x push ups')"               "$(k 'push-ups')"
 is "decorated option == logged name" "$(k 'kettlebell swings x10 @ 50 lb')" "$(k 'kettlebell swings')"
 is "duration does not fork"          "$(k 'farmer walk 1 min')"             "$(k 'farmer walk 2 min')"
 is "spelling does not fork"          "$(k 'Push-Ups x20')"                  "$(k 'pushups')"
@@ -289,6 +298,71 @@ in_waking_window 9  && ok  "09:00 is the first hour"    || bad "09:00 is the fir
 in_waking_window 20 && ok  "20:00 still nudges"         || bad "20:00 still nudges" "skipped" "allowed"
 in_waking_window 21 && bad "21:00 is already out"       "allowed" "skipped" || ok "21:00 is already out"
 in_waking_window 23 && bad "23:00 is out"               "allowed" "skipped" || ok "23:00 is out"
+
+echo "== today shows the spread across the day =="
+# Grease-the-groove lives on spread, so `today` says how many waking hours
+# got a set. A window of 0..24 keeps the test true at any hour of the day.
+reset_plan
+sed -i '' "s/^WAKE_START=.*/WAKE_START=0/; s/^WAKE_END=.*/WAKE_END=24/" "$GTG_CONF_DIR/plan.txt"
+export GTG_AT="$(date '+%Y-%m-%d')T00:05:00"
+record_typed 'pull-ups x5' home >/dev/null
+unset GTG_AT
+is "one set, one hour, of the hours so far" \
+  "$(./bin/gtg today | grep -c "in 1 of $(( $(date +%-H) + 1 )) waking hours")" "1"
+is "  and the strip marks hour 00" "$(./bin/gtg today | grep -c '^  00 ')" "1"
+
+echo "== fires: what happened to every nudge =="
+reset_plan
+D=$(date '+%Y-%m-%d')
+cat >"$GTG_STATE_DIR/nudge.log" <<N
+$D 02:20  skip: outside waking hours (9:00 until 21:00)
+$D 09:20  logged (typed): Pull-Ups x5
+$D 09:20  nudged (home): Pull Ups x5
+$D 09:50  skip: debounced, 30 min since the last nudge (needs 40); next due 10:00
+$D 10:20  snoozed
+$D 11:05  no answer (dismissed itself after 900s)
+$D 11:26  unknown movement declined: 5x Pull Ups
+$D 12:00  catch-up shown (unlocked after 3h)
+$D 12:01  catch-up done: 2 logged
+N
+fires=$(./bin/gtg fires 14)
+is "four dialogs shown"      "$(printf '%s\n' "$fires" | grep -c '4 nudges shown')" "1"
+is "the stamp line is not a fifth" "$(printf '%s\n' "$fires" | grep -c '5 nudges')" "0"
+is "logged share"            "$(printf '%s\n' "$fires" | grep -cE 'logged +1 +25%')" "1"
+is "no answer share"         "$(printf '%s\n' "$fires" | grep -cE 'no answer +1 +25%')" "1"
+is "refused share"           "$(printf '%s\n' "$fires" | grep -cE 'refused +1 +25%')" "1"
+is "skips summarized"        "$(printf '%s\n' "$fires" | grep -c '1 outside hours, 1 debounced, 0 in a meeting')" "1"
+is "catch-ups counted"       "$(printf '%s\n' "$fires" | grep -c 'catch-up: 1 shown, 2 sets logged')" "1"
+is "by hour: 11 shows two"   "$(printf '%s\n' "$fires" | awk '/^  hour/{for(i=2;i<=NF;i++)if($i=="11")c=i} /^  shown/{print $c}')" "2"
+
+# `gtg note` is how the menu bar records a catch-up into the same log the
+# nudges use, so `fires` sees both in one place.
+./bin/gtg note "catch-up shown (test)" >/dev/null
+is "a note lands in the nudge log" "$(./bin/gtg nudges | grep -c 'catch-up shown (test)')" "1"
+
+echo "== friction notes =="
+# The feedback loop needs somewhere to land in the moment, not a week later.
+reset_plan
+./bin/gtg friction "the box hid behind zoom" >/dev/null
+is "a friction note is kept"   "$(./bin/gtg friction | grep -c 'hid behind zoom')" "1"
+is "  with where you were"     "$(./bin/gtg friction | grep -cE '\[(home|away), [0-9]+ sets today\]')" "1"
+is "  in its own file"         "$([ -s "$GTG_STATE_DIR/friction.log" ] && echo yes)" "yes"
+
+echo "== every dialog compiles =="
+# Compiled, never shown: osacompile checks the syntax and opens nothing. The
+# add-a-movement prompt shipped with a syntax error and nobody saw it, because
+# osascript's stderr is discarded and its empty answer read as "declined".
+# The name carries a double quote so esc() is on the path as well.
+title="GTG"; DIALOG_TIMEOUT=900
+for d in alert_for other_for confirm_new_for; do
+  if "$d" 'Bulgarian "split" squats x10' | osacompile -o "$TMP/$d.scpt" 2>"$TMP/$d.err"; then
+    ok "$d compiles"
+  else
+    bad "$d compiles" "$(head -1 "$TMP/$d.err")" "clean compile"
+  fi
+done
+is "the add prompt names the movement" \
+  "$(confirm_new_for 'Bulgarian split squats x10' | grep -c 'Add \\"Bulgarian split squats x10\\" to your pool')" "1"
 
 echo "== readers run clean =="
 reset_plan

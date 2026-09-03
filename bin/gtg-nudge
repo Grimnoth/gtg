@@ -12,7 +12,7 @@ set -u
 # How far ahead a meeting still counts as "starting soon".
 SOON_MINS=12
 
-note() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M')" "$*"; }
+# note() lives in gtg-lib.sh: `gtg note` writes the same shape of line.
 
 [ -r "$PLAN" ] || { note "FATAL: no plan file at $PLAN"; exit 1; }
 
@@ -260,24 +260,10 @@ osa() {
 # a proper background agent, so the dialog renders as a standard alert instead
 # of whatever a arbitrary app makes of the event -- the mangled window with no
 # text field was iTerm2's rendering. And it measured 1s against 5s.
-alert_for() {
-  printf 'with timeout of %s seconds\n  tell application "System Events"\n    activate\n    set r to display alert "%s" message "%s" buttons {"Snooze", "Other...", "Did it"} default button "Did it" giving up after %s\n    if gave up of r then\n      return "__TIMEOUT__"\n    else\n      return button returned of r\n    end if\n  end tell\nend timeout\n' \
-    "$(( DIALOG_TIMEOUT + 60 ))" "$(esc "$title")" "$(esc "$1")" "$DIALOG_TIMEOUT"
-}
-
-# Asked when what you typed is not a movement this tool knows. The alternative
-# was guessing, and guessing merged two real movements without saying so.
-confirm_new_for() {
-  printf 'with timeout of %s seconds\n  tell application "System Events"\n    activate\n    set r to display alert "New movement" message "Add \"%s\" to your pool?" buttons {"Cancel", "Add it"} default button "Add it" giving up after 120\n    if gave up of r then\n      return "__TIMEOUT__"\n    else\n      return button returned of r\n    end if\n  end tell\nend timeout\n' \
-    "180" "$(esc "$1")"
-}
-
-# Prefilled with the suggestion, so "same movement, different count" is one
-# edit. `display dialog` also carries its own timeout.
-other_for() {
-  printf 'with timeout of 360 seconds\n  tell application "System Events"\n    activate\n    set r to display dialog "What did you do?" default answer "%s" with title "%s" buttons {"Cancel", "Log it"} default button "Log it" giving up after 300\n    if button returned of r is "Cancel" then\n      return "__CANCEL__"\n    else\n      return text returned of r\n    end if\n  end tell\nend timeout\n' \
-    "$(esc "$1")" "$(esc "$title")"
-}
+#
+# The three scripts themselves -- alert_for, other_for, confirm_new_for -- live
+# in gtg-lib.sh so the test suite can compile every one of them. They read
+# $title and $DIALOG_TIMEOUT from here.
 
 if [ "$style" = banner ]; then
   # Kept for reference only. See the note above: on this Mac it very likely
@@ -353,11 +339,15 @@ or: $hint"
       elif [ $? -eq 3 ]; then
         read_piece "$line"
         pretty=$(fmt_piece "$P_NAME" "$P_REPS" "$P_WT" "$P_DUR")
-        if [ "$(osa "$(confirm_new_for "$pretty")")" = "Add it" ]; then
-          note "logged (new movement): $(record_new "$line" "$where")"
-        else
-          note "unknown movement declined: $P_NAME"; exit 0
-        fi
+        # Three different non-answers, three different lines. "declined" once
+        # covered all of them, and for three weeks it was recording a prompt
+        # that had failed to compile as a person clicking Cancel.
+        case "$(osa "$(confirm_new_for "$pretty")")" in
+          "Add it")      note "logged (new movement): $(record_new "$line" "$where")" ;;
+          "Cancel")      note "unknown movement declined: $P_NAME"; exit 0 ;;
+          "__TIMEOUT__") note "unknown movement, add prompt unanswered: $P_NAME"; exit 0 ;;
+          *)             note "ERROR: add prompt did not display for: $P_NAME"; exit 1 ;;
+        esac
       else
         note "could not read that as a movement: $line"; exit 0
       fi

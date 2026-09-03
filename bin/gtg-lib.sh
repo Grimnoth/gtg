@@ -53,6 +53,8 @@ AWK_KEY='
     # "kettlebellswingsx10" -- which never matched the "kettlebellswing" the
     # same set was logged under, so rotation read the movement as never done.
     gsub(/[ \t]*[xX][0-9]+([ \t]|$)/, " ", s)
+    # "20x push ups": count first, then the x. The shape Ben types most.
+    gsub(/(^|[ \t])[0-9]+[ \t]*[xX]([ \t]|$)/, " ", s)
     gsub(/@/, " ", s)
     sub(/[ \t]+[0-9]+[ \t]*$/, "", s)
     sub(/^[0-9]+[ \t]+/, "", s)
@@ -85,6 +87,7 @@ AWK_CLEAN='
     # the plan entry "sled push x5 @ 90 lb" cleaned to "sled push x5", which
     # then rendered as "sled push x5 x5".
     gsub(/[ \t]*[xX][0-9]+([ \t]|$)/, " ", s)
+    gsub(/(^|[ \t])[0-9]+[ \t]*[xX]([ \t]|$)/, " ", s)
     sub(/^[0-9]+[ \t]+/, "", s)
     sub(/[ \t]+[0-9]+[ \t]*$/, "", s)
     # "@" goes, the comma stays: a comma is part of names you actually use,
@@ -129,6 +132,17 @@ where_am_i() {
   fi
 }
 
+# One stamped line, the shape every entry in nudge.log takes. gtg-nudge prints
+# these to stdout and launchd appends them; `gtg note` appends one directly.
+note() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M')" "$*"; }
+
+# Sets WAKE_S / WAKE_E from the plan, with the shipped defaults. The one place
+# the defaults live: the nudge, `today` and `fires` all read them from here.
+waking_bounds() {
+  WAKE_S=$(cfg WAKE_START); WAKE_S=${WAKE_S:-9}
+  WAKE_E=$(cfg WAKE_END);   WAKE_E=${WAKE_E:-21}
+}
+
 # True when a nudge may fire in the given hour. Sets WAKE_S / WAKE_E to the
 # bounds it used, so a caller can name them in its log line.
 #
@@ -140,8 +154,7 @@ where_am_i() {
 # Split out of gtg-nudge so both sides of the boundary can be tested without
 # reaching the part of that script that opens a dialog.
 in_waking_window() {
-  WAKE_S=$(cfg WAKE_START); WAKE_S=${WAKE_S:-9}
-  WAKE_E=$(cfg WAKE_END);   WAKE_E=${WAKE_E:-21}
+  waking_bounds
   [ "$1" -ge "$WAKE_S" ] && [ "$1" -lt "$WAKE_E" ]
 }
 
@@ -227,23 +240,6 @@ primary_option() {
   printf '%s' "${first:-do a quick set}"
 }
 
-# The rep count in a line, wherever it sits. Free text arrives in every shape:
-# "pull-ups x5", "5 ring dips", "ring dips 5".
-reps_from_line() {
-  local s="$1" n
-  # 1. An explicit "xN" is unambiguous, so it wins outright.
-  n=$(printf '%s' "$s" | sed -n 's/.*[[:space:]]x\([0-9]\{1,\}\).*/\1/p')
-  # 2. A bare number at the end: "ring dips 12".
-  [ -n "$n" ] || n=$(printf '%s' "$s" | sed -n 's/.*[^0-9]\([0-9]\{1,\}\)[[:space:]]*$/\1/p')
-  # 3. A leading number: "12 ring dips" -- but not when it introduces a
-  #    duration ("2 min walk", "30 sec hang"), which is a time, not a count.
-  if [ -z "$n" ] \
-     && ! printf '%s' "$s" | grep -qiE '^[0-9]+[[:space:]]*(m|s|min|sec|minute|second)'; then
-    n=$(printf '%s' "$s" | sed -n 's/^\([0-9]\{1,\}\)[[:space:]].*/\1/p')
-  fi
-  printf '%s' "$n"
-}
-
 # Pull the four separable facts out of one free-text movement report, printed
 # as four LINES: name, reps, weight, duration_seconds.
 #
@@ -270,6 +266,9 @@ reps_from_line() {
 AWK_PARSE='
     function parse(s,   w, d, r, t, u) {
       w = ""; d = ""; r = ""
+      # A sentence ends in a period; a movement does not. "kettlebell walk."
+      # was refused as unknown for the dot alone.
+      sub(/[.!]+[ \t]*$/, "", s)
       if (match(s, /[0-9]+(\.[0-9]+)?[ \t]*([Ll][Bb][Ss]?|[Kk][Gg][Ss]?|#)/)) {
         t = substr(s, RSTART, RLENGTH); s = substr(s,1,RSTART-1) " " substr(s,RSTART+RLENGTH)
         u = (tolower(t) ~ /kg/) ? "kg" : "lb"; gsub(/[^0-9.]/, "", t); w = t u
@@ -288,6 +287,11 @@ AWK_PARSE='
         gsub(/[^0-9.]/, "", t); d = int(t)
       }
       if (match(s, /[xX][0-9]+/)) {
+        t=substr(s,RSTART,RLENGTH); s=substr(s,1,RSTART-1) " " substr(s,RSTART+RLENGTH)
+        gsub(/[^0-9]/,"",t); r=t
+      # "20x Push Ups" and "8 x ring dips": the count before the x. Twelve
+      # of the first twenty-three refused entries were this shape.
+      } else if (match(s, /(^|[ \t])[0-9]+[ \t]*[xX]([ \t]|$)/)) {
         t=substr(s,RSTART,RLENGTH); s=substr(s,1,RSTART-1) " " substr(s,RSTART+RLENGTH)
         gsub(/[^0-9]/,"",t); r=t
       } else if (match(s, /^[ \t]*[0-9]+[ \t]/)) {
@@ -507,6 +511,13 @@ when_to_iso() {
     ts=$(date -j -f '%Y-%m-%dT%H:%M:%S' -v-1d "$ts" '+%Y-%m-%dT%H:%M:00')
   fi
   printf '%s' "$ts"
+}
+
+# How many sets landed today, skips excluded. The menu bar title and a
+# friction note both want the number without the listing.
+sets_today() {
+  [ -s "$LOG" ] || { printf '0'; return 0; }
+  awk -F'\t' -v d="$(date '+%Y-%m-%d')" 'index($1, d) == 1 && $3 != "skip" { n++ } END { printf "%d", n }' "$LOG"
 }
 
 # Every movement this tool knows, as "key<TAB>name", newest spelling last.
@@ -770,3 +781,39 @@ record_new() {
 
 # Escape for embedding in an AppleScript double-quoted string.
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+# The dialogs gtg-nudge shows, as AppleScript source. Each reads $title and
+# $DIALOG_TIMEOUT from the caller. They live here rather than in gtg-nudge so
+# the test suite can source them and compile every one with osacompile.
+#
+# That test exists because confirm_new_for never compiled from the day it was
+# written until 2026-09-03. Its format string held \" to quote the movement
+# name, and printf reads \" in a FORMAT as a bare quote -- so the script that
+# reached osascript said `message "Add "Bulgarian Split Squats" to your
+# pool?"`, a syntax error. osascript printed nothing, stderr was discarded,
+# and the empty answer was recorded as "unknown movement declined". Fifteen
+# declines in the log, and not one of them was a person saying no.
+#
+# Only %s carries text into these, and the text goes through esc() first. A
+# literal quote in the format must be written \\" so printf emits \".
+
+# One recommendation and three buttons. Three is the hard limit of `display
+# alert`, and unlike `choose from list` it supports `giving up after`.
+alert_for() {
+  printf 'with timeout of %s seconds\n  tell application "System Events"\n    activate\n    set r to display alert "%s" message "%s" buttons {"Snooze", "Other...", "Did it"} default button "Did it" giving up after %s\n    if gave up of r then\n      return "__TIMEOUT__"\n    else\n      return button returned of r\n    end if\n  end tell\nend timeout\n' \
+    "$(( DIALOG_TIMEOUT + 60 ))" "$(esc "$title")" "$(esc "$1")" "$DIALOG_TIMEOUT"
+}
+
+# Asked when what you typed is not a movement this tool knows. The alternative
+# was guessing, and guessing merged two real movements without saying so.
+confirm_new_for() {
+  printf 'with timeout of %s seconds\n  tell application "System Events"\n    activate\n    set r to display alert "New movement" message "Add \\"%s\\" to your pool?" buttons {"Cancel", "Add it"} default button "Add it" giving up after 120\n    if gave up of r then\n      return "__TIMEOUT__"\n    else\n      return button returned of r\n    end if\n  end tell\nend timeout\n' \
+    "180" "$(esc "$1")"
+}
+
+# Prefilled with the suggestion, so "same movement, different count" is one
+# edit. `display dialog` also carries its own timeout.
+other_for() {
+  printf 'with timeout of 360 seconds\n  tell application "System Events"\n    activate\n    set r to display dialog "What did you do?" default answer "%s" with title "%s" buttons {"Cancel", "Log it"} default button "Log it" giving up after 300\n    if button returned of r is "Cancel" then\n      return "__CANCEL__"\n    else\n      return text returned of r\n    end if\n  end tell\nend timeout\n' \
+    "$(esc "$1")" "$(esc "$title")"
+}
