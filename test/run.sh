@@ -354,6 +354,30 @@ is "a friction note is kept"   "$(./bin/gtg friction | grep -c 'hid behind zoom'
 is "  with where you were"     "$(./bin/gtg friction | grep -cE '\[(home|away), [0-9]+ sets today\]')" "1"
 is "  in its own file"         "$([ -s "$GTG_STATE_DIR/friction.log" ] && echo yes)" "yes"
 
+echo "== calendar: off unless the plan names one, and the script compiles =="
+# The test plan has no CALENDAR line, so nothing here can reach the real
+# Calendar.app. That is asserted, not assumed.
+is "test plan names no calendar" "$(cfg CALENDAR)" ""
+is "calendar_event is a no-op then" "$(calendar_event 'pull-ups x5' '2026-09-03T11:52:00' home; echo "rc=$?")" "rc=0"
+for s in 'Pull-Ups x5' 'Bulgarian "split" squats x10 @ 20 lb'; do
+  if calendar_script 'GTG' "$s" '2026-09-03T11:52:00' home | osacompile -o "$TMP/cal.scpt" 2>"$TMP/cal.err"; then
+    ok "calendar script compiles: $s"
+  else
+    bad "calendar script compiles: $s" "$(head -1 "$TMP/cal.err")" "clean compile"
+  fi
+done
+is "the event carries the set's own time" \
+  "$(calendar_script GTG 'Pull-Ups x5' '2026-09-03T07:15:00' home | grep -c 'set hours of d to 7$')" "1"
+# The rows the sync feeds the calendar. A timed set has an EMPTY reps column,
+# and the first sync read "home" into it and wrote "dead hang xhome".
+reset_plan
+record_typed 'farmer walk 1 min' home >/dev/null
+record_typed 'kettlebell swings x10 @ 50 lb' away >/dev/null
+record_option 'pull-ups x5' home skip >/dev/null
+is "empty reps do not shift the columns" "$(sync_rows 1 | head -1 | cut -f1,3)" "farmer walk 1 min	home"
+is "weight rides along"                  "$(sync_rows 1 | sed -n 2p | cut -f1,3)" "kettlebell swings x10 @ 50 lb	away"
+is "skips are not synced"                "$(sync_rows 1 | wc -l | tr -d ' ')" "2"
+
 echo "== every dialog compiles =="
 # Compiled, never shown: osacompile checks the syntax and opens nothing. The
 # add-a-movement prompt shipped with a syntax error and nobody saw it, because

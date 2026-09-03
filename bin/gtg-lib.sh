@@ -407,11 +407,78 @@ fmt_piece() {
 # GTG_NO_PAGE suppresses the page rebuild so a batch renders once at the end
 # rather than once per movement.
 record() {
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "${GTG_AT:-$(date '+%Y-%m-%dT%H:%M:%S')}" "$1" "$2" "$3" "${4:-}" "${5:-}" >>"$LOG"
+  local ts="${GTG_AT:-$(date '+%Y-%m-%dT%H:%M:%S')}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$ts" "$1" "$2" "$3" "${4:-}" "${5:-}" >>"$LOG"
+  # Backgrounded, with every fd closed: record() runs inside command
+  # substitutions, and a child still holding stdout keeps the caller waiting
+  # until Calendar answers, which is seven seconds. That is exactly what
+  # `[ skip ] || calendar_event ... >/dev/null &` did -- the redirect covered
+  # the inner command while the backgrounded LIST kept the pipe. Measured: a
+  # menu click took 8s to confirm. The if form redirects the child itself.
+  if [ "$2" != skip ]; then
+    calendar_event "$(fmt_piece "$1" "$2" "${4:-}" "${5:-}")" "$ts" "$3" </dev/null >/dev/null 2>&1 &
+  fi
   [ -n "${GTG_NO_PAGE:-}" ] && return 0
   # Refresh the history page so an already-open tab only needs a reload.
   "$(dirname "$0")/gtg-page" --no-open >/dev/null 2>&1 || true
+}
+
+# The AppleScript that puts one set on the calendar as a zero-minute event at
+# the set's own time, so a backdated 7:15 set lands at 7:15. Idempotent: an
+# event with the same summary at the same minute is not written twice, which
+# is what lets `gtg calendar-sync` be re-run and lets record() and the sync
+# overlap without a duplicate.
+#
+# The date is built from parts rather than parsed from a string, because
+# `date "..."` in AppleScript reads the string in the user's locale format.
+# Day is set to 1 first so that setting month never overflows a short month.
+#
+# Only %s carries text in, and every one goes through esc(). A literal quote
+# in the format is \\" (see the dialog builders above for why).
+calendar_script() {
+  local cal="$1" summary="$2" iso="$3" where="${4:-}"
+  local Y=${iso:0:4} M=${iso:5:2} D=${iso:8:2} h=${iso:11:2} m=${iso:14:2}
+  printf 'with timeout of 30 seconds\n  tell application "Calendar"\n    set d to current date\n    set day of d to 1\n    set year of d to %d\n    set month of d to %d\n    set day of d to %d\n    set hours of d to %d\n    set minutes of d to %d\n    set seconds of d to 0\n    tell calendar "%s"\n      if (count of (every event whose start date = d and summary = "%s")) = 0 then\n        make new event with properties {summary:"%s", start date:d, end date:d, description:"%s"}\n      end if\n    end tell\n  end tell\nend timeout\n' \
+    "$((10#$Y))" "$((10#$M))" "$((10#$D))" "$((10#$h))" "$((10#$m))" \
+    "$(esc "$cal")" "$(esc "$summary")" "$(esc "$summary")" "$(esc "$where")"
+}
+
+# Put one set on the calendar named by CALENDAR= in plan.txt. No name, no
+# calendar, and no Calendar.app is ever launched. calendar_event SUMMARY ISO WHERE
+#
+# Calendar.app has to be running for AppleScript to reach it, so it is started
+# hidden when it is not. A failed write is written to the nudge log by name,
+# never swallowed: a calendar that quietly stops filling is the same shape as
+# a reminder that quietly stops reminding.
+calendar_event() {
+  local cal err
+  cal=$(cfg CALENDAR)
+  [ -n "$cal" ] || return 0
+  pgrep -xq Calendar || { open -gj -a Calendar 2>/dev/null; sleep 3; }
+  err=$(mktemp)
+  if ! /usr/bin/osascript >/dev/null 2>"$err" <<<"$(calendar_script "$cal" "$1" "$2" "${3:-}")"; then
+    note "calendar write failed for \"$1\" at $2: $(head -1 "$err")" >>"$NUDGE_LOG"
+    rm -f "$err"; return 1
+  fi
+  rm -f "$err"
+}
+
+# The sets of the last N days, one per line as SUMMARY<TAB>ISO<TAB>WHERE, for
+# the calendar sync. Skips excluded.
+#
+# The log is read by awk and re-emitted with a unit separator (0x1f) between
+# columns, because `IFS=$'\t' read` collapses a run of empty fields -- and an
+# empty reps column (a timed hang has none) slid "home" into the reps slot,
+# which put "dead hang xhome" on the calendar the first time this ran.
+sync_rows() {
+  local days="${1:-30}" since us ts ex reps wh wt secs
+  us=$(printf '\037')
+  since=$(date -v-"$(( days - 1 ))"d '+%Y-%m-%d')
+  awk -F'\t' -v OFS="$us" -v since="$since" \
+    'substr($1, 1, 10) >= since && $3 != "skip" { print $1, $2, $3, $4, $5, $6 }' "$LOG" \
+  | while IFS="$us" read -r ts ex reps wh wt secs; do
+      printf '%s\t%s\t%s\n' "$(fmt_piece "$ex" "$reps" "$wt" "$secs")" "$ts" "$wh"
+    done
 }
 
 # Rebuild the history page. Same call record() makes, named so a batch can make

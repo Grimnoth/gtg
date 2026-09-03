@@ -111,6 +111,28 @@ copy of your history to serve a convenience is the exact shape of the bug
 instead, and "the weight you last lifted" means latest by timestamp -- with file
 order breaking a tie, since a whole round lands inside one second.
 
+## Every set is also a calendar event
+
+Set `CALENDAR=GTG` in `plan.txt` and every logged set is mirrored onto that
+calendar as a zero-minute event at the set's own time, so a backdated 7:15
+set lands at 7:15. The calendar lives in Google, synced into Calendar.app, so
+the history is on the phone and in the calendar already being looked at. The
+write goes through Calendar.app by AppleScript, in the background, and is
+idempotent: the same set at the same minute is never written twice.
+
+`gtg calendar-sync 30` writes the last 30 days. It is the one-time backfill,
+and the repair if Calendar.app was not running for a while. Safe to re-run.
+
+The first run of it put `dead hang xhome` on the calendar. Reading the log
+with `IFS=$'\t' read` collapses a run of empty fields, so a timed set with no
+rep count slid "home" into the reps column. That is the same trap the parser
+comments describe, met a second time; the sync now re-emits rows with a unit
+separator before splitting them, and the suite feeds it a timed set.
+
+A failed write is named in the nudge log, never swallowed. Put the same name
+in `IGNORE_CALENDARS` so the nudge does not read its own sets back as
+meetings.
+
 ## The menu bar
 
 A 🏋 item showing today's count and spread, `🏋 3 · 2/5h` meaning three sets

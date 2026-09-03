@@ -26,6 +26,13 @@ SOUND=Ping
 # SPEAK=yes reads the exercise aloud. Genuinely hard to ignore.
 SPEAK=
 
+# A calendar to mirror every set onto, as a zero-minute event at the set's own
+# time, so the history is on your phone and in the calendar you already look
+# at. Create it in Google Calendar (or Calendar.app) first; empty = off.
+# Add the same name to IGNORE_CALENDARS below so the nudge never reads its
+# own sets back as meetings. `gtg calendar-sync` backfills older rows.
+CALENDAR=
+
 # Which calendars count as "busy". Empty = all of them. All-day events are
 # always excluded, so birthdays and subscribed holidays cannot mute your day.
 BUSY_CALENDARS=

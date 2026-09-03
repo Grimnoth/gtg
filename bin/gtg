@@ -26,6 +26,7 @@ gtg where      home or away, and why
 gtg skip       record a miss
 gtg add "X"    teach it a new movement (gtg add "swings x10 @ 50 lb" [pool])
 gtg backfill   propose splitting old entry names into columns (writes nothing)
+gtg calendar-sync  put the last 30 days of sets on the CALENDAR= calendar (gtg calendar-sync 90)
 gtg nudges     the last 20 fires and what each one did (gtg nudges 50)
 gtg fires      what became of every nudge in the last 14 days (gtg fires 30)
 gtg note "X"   stamp a line into the nudge log (the menu bar's catch-up uses it)
@@ -231,6 +232,29 @@ case "${1:-done}" in
     else
       echo "no friction notes yet"
     fi
+    ;;
+
+  calendar-sync)
+    # Put every set from the last N days (default 30) on the calendar named
+    # in plan.txt. Safe to re-run: an event already there is not written
+    # twice. This is the one-time backfill for rows logged before the
+    # calendar existed, and the repair if Calendar.app was down for a while.
+    days=${2:-30}
+    cal=$(cfg CALENDAR)
+    if [ -z "$cal" ]; then echo "no CALENDAR= line in $PLAN" >&2; exit 1; fi
+    if [ ! -s "$LOG" ]; then echo "nothing logged yet"; exit 0; fi
+    n=0; bad=0
+    # A summary cannot contain a tab, so a tab-split here is safe: the
+    # trap is empty FIELDS, and sync_rows never emits one.
+    while IFS="$(printf '\t')" read -r summary ts wh; do
+      if calendar_event "$summary" "$ts" "$wh"; then
+        n=$((n + 1)); printf '\r  %d written or already there' "$n"
+      else
+        bad=$((bad + 1))
+      fi
+    done < <(sync_rows "$days")
+    echo
+    echo "$n set(s) on calendar \"$cal\" for the last $days days$([ "$bad" -gt 0 ] && echo ", $bad failed (see gtg nudges)")"
     ;;
 
   fires)
