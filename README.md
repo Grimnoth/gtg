@@ -50,9 +50,11 @@ A modal picker listing the day's options, first one preselected, plus
 - **Other...** opens a text field for whatever you actually did instead. What
   you type is looked up against the movements you already have, so a prefix is
   enough: `kett x15` logs 15 kettlebell swings. A movement it does not know is
-  a question, not a guess -- it offers to add it (see below).
-- One dialog records **one set**. Report two movements and it will not know
-  the combination, and will ask rather than split it apart on your behalf.
+  a question, not a guess -- the line comes back in a box to fix or confirm
+  (see below).
+- One dialog records a **whole round**: `pull-ups x5 and dead hang 30s`. The
+  word "and", `;` and `|` separate sets, and the round is checked in full
+  before a single row is written.
 - **Snooze**, or letting it time out after 15 minutes, deliberately leaves the
   slot unconsumed, so the next fire retries rather than skipping the hour.
 
@@ -65,13 +67,16 @@ with every other form.
 And the menu bar **asks**. Most mornings hold two or three sets before the
 first unlock, and the log showed almost none of them: by the time the computer
 was open they were forgotten. So the first unlock after two hours away, or
-after a night, opens a box titled "Before you sat down?". Each line is one
-`@time ...` entry, and it asks again until you say that is all. Every showing
-is stamped into the nudge log, so `gtg fires` reports how much it catches.
+after a night, opens a box titled "Before you sat down?". One box, the whole
+morning in one line: `@7:15 pull-ups x5 and @7:40 ring dips x5 and dead hang
+30s`. It used to ask again after every entry until you said that was all, and
+that second box was the complaint. Every showing is stamped into the nudge
+log, so `gtg fires` reports how much it catches.
 
 ```sh
 gtg @8am 10 ring crunches
-gtg @7:15 "pull-ups x5; dead hang 30s"     # a whole round at once
+gtg @7:15 "pull-ups x5 and dead hang 30s"  # a whole round at once
+gtg "@7:15 pull-ups x5; @7:40 dead hang 30s"  # two times, one line
 gtg @7:15 "10x bulgarian split squats"    # count first is fine too
 gtg @-90m push-ups x20                     # ninety minutes ago
 gtg @yesterday 6pm ring dips x5             # multi-word times need no quotes
@@ -97,11 +102,17 @@ three-word candidate `yesterday 7am 10` is not a time and fails to parse, so
 the count stays with the movement. A parser that guessed rather than failed
 would have silently logged ten o'clock.
 
-`;` and `|` separate movements in a round. A **comma does not** -- the shipped
-option `stairs, 2 flights` is one movement whose name contains one, and
-`clean and press` is why "and" is not a separator either. A round is checked in
-full before a single row is written: it should not half-land because the third
-movement was misspelled, leaving you to work out which half made it.
+`;`, `|`, `&` and the word "and" separate movements in a round, because "and"
+is how a round gets dictated. A **comma does not** -- the shipped option
+`stairs, 2 flights` is one movement whose name contains one. A movement named
+with "and" (`clean and press`) would be torn in two; no pool here has one, and
+the ponytail on `record_batch` names the fix if one arrives. A round is
+checked in full before a single row is written: it should not half-land
+because the third movement was misspelled, leaving you to work out which half
+made it.
+
+A piece may carry its own `@time`. A morning done at two times is one line,
+and a piece without a time follows the one before it, a second later.
 
 ### The log stays append-only
 
@@ -151,7 +162,7 @@ and two of the five waking hours so far got one, from `~/.hammerspoon/gtg.lua`:
 5 sets today  ·  home
 Did ring dips x5              <- the rotation's pick, one click
 Log something else…
-Log what I did before sitting down…   <- @8am ... one box per set, asks again
+Log what I did before sitting down…   <- one box, the whole morning in one line
 Something got in the way…     <- a friction note, stamped with the context
 Today  >                      <- every set, with times
 History page…
@@ -212,12 +223,20 @@ with the weight spelled out. Adding a movement that is already there is
 refused rather than duplicated; to change an entry, log it once with the new
 weight or run `gtg edit`.
 
-Typing something it does not know gets you an offer to add it -- one button in
-the dialog, or the exact `gtg add` line on the command line. Nothing is
-recorded until you say yes.
+Typing something it does not know gets you a box with your line in it. Fix
+the spelling and it resolves. **Log it** records it under the name as typed,
+and from then on the log is what makes it known. **Add to pool** does that and
+offers it every day. Nothing is recorded until you press one of them. On the
+command line the same two answers are `gtg --new "..."` and
+`gtg --offer "..."`, and the menu bar asks the same question with the same
+box (its version has **Log it** only; `gtg add` is how it gets offered).
 
-That button did not exist for its first three weeks. The script that builds
-the "Add it?" box had its quote marks mangled on the way to osascript, which
+Before this, the menu bar path showed a terminal command in a dialog and
+stopped, and the nudge asked yes-or-no with nothing to edit: a misspelling
+had to be declined and retyped from the start.
+
+The nudge's question did not exist at all for its first three weeks. The
+script that built the "Add it?" box had its quote marks mangled on the way to osascript, which
 rejected it and printed nothing, and nothing was recorded as "declined". Fifteen
 declines in the log, none of them a person. The test suite now compiles every
 dialog script with `osacompile`, and a prompt that fails to display logs as
@@ -238,15 +257,18 @@ edit distance of one, or two for longer names. That turns `10 puships` into
 Press` -- distance 2, both long, exactly the threshold -- merging two real
 movements with nothing in the log to say it happened.
 
-It **split on separators**, so one report could become several entries. That
-turns `10 air squats and 10 pushups` into two sets, which is also lovely, and
-it tears `clean and press x5` in half, and breaks the `stairs, 2 flights`
+It **split on every separator**, so one report could become several entries.
+That turns `10 air squats and 10 pushups` into two sets, which is also lovely,
+and it tore `clean and press x5` in half, and broke the `stairs, 2 flights`
 option shipped in this file's own away pool.
 
 Both were heuristics guessing at intent, and every fix for one made the other
 worse. A closed set you extend deliberately needs no guessing: an exact or
-unambiguous-prefix match is decidable, and explainable when it is wrong. The
-cost is that logging two movements at once takes two entries.
+unambiguous-prefix match is decidable, and explainable when it is wrong.
+
+"and" came back as a separator on 2026-09-08, deliberately and with the
+trade-off written down: no pool names a movement with it, and it is the word
+a round gets dictated with. The comma stays unsplit.
 
 ## A movement is a name, not a sentence
 

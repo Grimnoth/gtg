@@ -9,7 +9,9 @@ usage() {
 gtg            log today's first option as done
 gtg 12         log 12 reps of that option
 gtg "rows x10" log whatever you actually did
-gtg "a; b; c"  log a whole round, ";" between movements
+gtg "a and b"  log a whole round: "and" or ";" between movements
+gtg --new "X"  log a movement it does not know yet, under the name as typed
+gtg --offer "X"  the same, and offer it every day from now on
 
 A leading @time logs a set you did EARLIER, which is the point of it -- a
 round done before you sat down has nowhere else to go:
@@ -40,6 +42,16 @@ gtg plan       print the current plan
 gtg edit       open plan.txt in $EDITOR
 EOF
 }
+
+# --new / --offer: log a movement this tool does not know yet, under the name
+# as typed. The menu bar and the nudge set these after asking you; on the
+# command line you say it yourself. --offer also puts it in the every-day
+# pool. record_batch reads GTG_NEW.
+GTG_NEW=""
+case "${1:-}" in
+  --new)   GTG_NEW=log;  shift ;;
+  --offer) GTG_NEW=pool; shift ;;
+esac
 
 # A leading "@..." backdates everything after it. Handled once here rather than
 # inside each branch, so it composes with the bare form, a rep count and free
@@ -350,6 +362,11 @@ case "${1:-done}" in
         # Grease-the-groove lives on SPREAD, not on the count: ten sets in one
         # clump after lunch is a workout, not the method. One cell per waking
         # hour: # got a set, . passed empty, - still ahead.
+        #
+        # A set before WAKE_START widens the strip to reach it. The sets
+        # done before the first nudge are the ones this tool most wants,
+        # and the menu bar read "3 · 0/0h" on a morning that had three.
+        for (h in hh) if (h + 0 < ws) ws = h + 0
         l1 = "  "; l2 = "  "; cov = 0; sofar = 0
         for (h = ws; h < we; h++) {
           l1 = l1 sprintf("%02d ", h)
@@ -453,8 +470,8 @@ case "${1:-done}" in
       echo "logged: $(record_option "$line" "$where" "$1")  [$where]$(at_note)"
     else
       # Anything else is whatever you actually did: gtg "chin-ups x8", or a
-      # whole round separated by ";". An unknown movement is a question, not a
-      # guess: nothing is recorded until you say to add it.
+      # whole round with "and" or ";" between sets. An unknown movement is a
+      # question, not a guess: nothing is recorded until you say --new.
       out=$(record_batch "$1" "$where"); rc=$?
       case "$rc" in
         0) printf '%s\n' "$out" | sed 's/^/logged: /'

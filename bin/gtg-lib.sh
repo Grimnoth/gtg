@@ -47,7 +47,7 @@ AWK_KEY='
     gsub(/[0-9]+(\.[0-9]+)?[ \t]*(lbs?|kgs?|#)/, " ", s)
     gsub(/[0-9]+(\.[0-9]+)?[ \t]*(minutes?|mins?|seconds?|secs?)/, " ", s)
     gsub(/[0-9]+[ \t]*s([^a-z]|$)/, " ", s)
-    gsub(/[ \t]+(total|each|per hand|with|of)([ \t]|$)/, " ", s)
+    gsub(/[ \t]+(total|each|per hand|with|of|for)([ \t]|$)/, " ", s)
     # Anywhere, not anchored at the end. Once decorate_weights appends
     # "@ 50 lb", the count is no longer last, and an end-anchored strip left
     # "kettlebellswingsx10" -- which never matched the "kettlebellswing" the
@@ -93,7 +93,7 @@ AWK_CLEAN='
     # "@" goes, the comma stays: a comma is part of names you actually use,
     # such as the shipped "stairs, 2 flights".
     gsub(/[ \t]+-[ \t]+/, " ", s); gsub(/@/, " ", s)
-    gsub(/[ \t]+(total|each|per hand|with|of)[ \t]*$/, "", s)
+    gsub(/[ \t]+(total|each|per hand|with|of|for)[ \t]*$/, "", s)
     gsub(/^[ \t]+|[ \t]+$/, "", s); gsub(/[ \t]+/, " ", s)
     return s
   }
@@ -300,7 +300,9 @@ AWK_PARSE='
         t=substr(s,RSTART,RLENGTH); s=substr(s,1,RSTART-1); gsub(/[^0-9]/,"",t); r=t
       }
       gsub(/[ \t]+-[ \t]+/, " ", s); gsub(/@/, " ", s)
-      gsub(/[ \t]+([Tt][Oo][Tt][Aa][Ll]|[Ee][Aa][Cc][Hh]|[Pp]er hand|[Ww][Ii][Tt][Hh]|[Oo][Ff])[ \t]*$/, "", s)
+      # "for" too: "Running for 20 minutes" logged a movement called
+      # "Running for" once the duration was lifted out.
+      gsub(/[ \t]+([Tt][Oo][Tt][Aa][Ll]|[Ee][Aa][Cc][Hh]|[Pp]er hand|[Ww][Ii][Tt][Hh]|[Oo][Ff]|[Ff][Oo][Rr])[ \t]*$/, "", s)
       gsub(/[ \t]+[xX][ \t]*$/, "", s)   # a count taken away can leave its "x"
       gsub(/^[ \t]+|[ \t]+$/, "", s); gsub(/[ \t]+/, " ", s)
       PN = s; PR = r; PW = w; PD = d
@@ -713,27 +715,6 @@ record_option() {
   fmt_piece "$name" "$P_REPS" "$wt" "$P_DUR"
 }
 
-# Log one typed report as ONE set.
-#
-# Deliberately no splitting on commas or the word "and". Splitting every
-# separator tore real movement names apart -- "clean and press x5" became two
-# entries, and the shipped `stairs, 2 flights` option became "stairs" plus
-# "2 flights". One dialog, one set, is both simpler and correct.
-#
-# Prints the recorded line. Returns 3, printing nothing, when the movement is
-# not one we know: the caller decides whether to add it, which is a question
-# worth asking rather than a guess worth making.
-record_typed() {
-  local text="$1" where="$2" name wt
-  read_piece "$text"
-  [ -n "$P_NAME" ] || return 1
-  name=$(resolve_movement "$P_NAME")
-  [ -n "$name" ] || return 3
-  wt="$P_WT"; [ -n "$wt" ] || wt=$(last_weight_for "$name")
-  record "$name" "$P_REPS" "$where" "$wt" "$P_DUR"
-  fmt_piece "$name" "$P_REPS" "$wt" "$P_DUR"; printf '\n'
-}
-
 # Pull a leading "@<time>" off one line of text. Sets AT_ISO and AT_REST.
 #
 # A dialog has ONE text field and no quoting, so the time has to be allowed to
@@ -770,18 +751,33 @@ split_at() {
 }
 
 # Log a whole round typed in one go: "10 ring crunches; pull-ups x5; hang 30s".
+# One movement is a round of one, and every typed report comes through here.
 #
 # A round done away from the keyboard is remembered as a round, so making you
 # type it one movement per command is the wrong shape -- and the menu bar has
 # exactly one text field to offer.
 #
-# ";" and "|" separate; a COMMA does not. That is not fussiness: the shipped
-# option `stairs, 2 flights` is one movement with a comma in its name, and
-# `clean and press` is why "and" is not a separator either.
+# ";", "|", "&" and the word "and" separate; a COMMA does not. That is not
+# fussiness: the shipped option `stairs, 2 flights` is one movement with a
+# comma in its name.
+#
+# ponytail: "and" tears a movement NAMED with it ("clean and press") in two.
+# No pool here has one, and "and" is how a round gets dictated. If one ever
+# arrives, try the whole piece against known_movements before splitting it.
+#
+# A piece may carry its own "@time": "@7:15 pull-ups x5; @7:40 dead hang 30s"
+# is a morning done at two times, typed as one line. A piece without a time
+# follows the one before it, a second later.
 #
 # Checked in FULL before a single row is written. A round typed in one breath
 # should not half-land because the third movement was misspelled, leaving you
 # to work out which half made it.
+#
+# An unknown movement returns 3, names it on stderr, and writes nothing: the
+# caller asks, rather than guessing. With GTG_NEW set the same movement is
+# logged under the name as typed -- the caller has asked, and the log is what
+# makes a movement known from then on. GTG_NEW=pool also puts it in the
+# every-day pool, before the first row is written.
 #
 # Deliberately no bash arrays. This is /bin/bash, which on macOS is 3.2, and
 # every caller runs under `set -u` -- where ${#arr[@]} on an array that has not
@@ -789,28 +785,58 @@ split_at() {
 # "name<TAB>piece" line per movement carries the same information with no such
 # edge, since a movement name cannot contain a tab or a newline.
 record_batch() {
-  local text="$1" where="$2" piece name wt base i ts validated=""
+  local text="$1" where="$2" piece name wt orig base i ts at new us validated=""
+  # Unit separator between the fields of a validated line, not a tab: tab is
+  # IFS whitespace, and `read` collapses a run of empty tab fields -- an empty
+  # time would slide the "new" mark into its slot.
+  us=$(printf '\037')
   while IFS= read -r piece; do
     piece=$(printf '%s' "$piece" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
     [ -n "$piece" ] || continue
+    at=""
+    case "$piece" in
+      @*) split_at "$piece"
+          [ -n "$AT_ISO" ] || { echo "could not read a time out of: $piece" >&2; return 1; }
+          at="$AT_ISO"; piece="$AT_REST" ;;
+    esac
     read_piece "$piece"
     [ -n "$P_NAME" ] || { echo "could not read that as a movement: $piece" >&2; return 1; }
-    name=$(resolve_movement "$P_NAME")
+    name=$(resolve_movement "$P_NAME"); new=""
     if [ -z "$name" ]; then
-      echo "unknown movement: $P_NAME" >&2
-      echo "add it first:  gtg add \"$(fmt_piece "$P_NAME" "$P_REPS" "$P_WT" "$P_DUR")\"" >&2
-      return 3
+      if [ -n "${GTG_NEW:-}" ]; then
+        name="$P_NAME"; new=new
+      else
+        echo "unknown movement: $P_NAME" >&2
+        echo "new? log it as typed:  gtg --new \"$text\"   (--offer to also see it daily)" >&2
+        return 3
+      fi
     fi
-    validated="$validated$name	$piece
+    validated="$validated$name$us$piece$us$at$us$new
 "
-  done < <(printf '%s\n' "$text" | tr ';|' '\n\n')
+  done < <(printf '%s\n' "$text" | tr ';|' '\n\n' \
+           | awk '{ gsub(/[ \t]+([Aa][Nn][Dd]|&)[ \t]+/, "\n"); print }')
   [ -n "$validated" ] || return 1
 
-  base="${GTG_AT:-}"
+  # The pool first, and all of it before any row: a plan that cannot be
+  # written is a reason to log nothing, not half a round.
+  if [ "${GTG_NEW:-}" = pool ]; then
+    while IFS="$us" read -r name piece at new; do
+      [ "$new" = new ] || continue
+      read_piece "$piece"
+      plan_add "$(fmt_piece "$name" "$P_REPS" "$P_WT" "$P_DUR")" every
+      case $? in 0|2) ;; *) return 1 ;; esac
+    done <<EOF
+$validated
+EOF
+  fi
+
+  orig="${GTG_AT:-}"; base="$orig"
   GTG_NO_PAGE=1
   i=0
-  while IFS="$(printf '\t')" read -r name piece; do
+  while IFS="$us" read -r name piece at new; do
     [ -n "$name" ] || continue
+    # A piece with its own time restarts the count from there.
+    if [ -n "$at" ]; then base="$at"; i=0; fi
     # One second apart, so a round reads back in the order you did it rather
     # than in whatever order identical timestamps happen to sort.
     if [ -n "$base" ]; then
@@ -825,24 +851,8 @@ record_batch() {
   done <<EOF
 $validated
 EOF
-  GTG_AT="$base"; unset GTG_NO_PAGE
+  GTG_AT="$orig"; unset GTG_NO_PAGE
   refresh_page
-}
-
-# Log a typed report for a movement you have just agreed to add.
-record_new() {
-  local text="$1" where="$2" pool="${3:-every}" wt
-  read_piece "$text"
-  [ -n "$P_NAME" ] || return 1
-  # 0 added, 2 already there -- both mean the movement is in a pool. Anything
-  # else failed, and recording it after telling you it was added would be a
-  # lie: the set would never be offered again.
-  plan_add "$(fmt_piece "$P_NAME" "$P_REPS" "$P_WT" "$P_DUR")" "$pool"
-  case $? in 0|2) ;; *) return 1 ;; esac
-  read_piece "$text"
-  wt="$P_WT"
-  record "$P_NAME" "$P_REPS" "$where" "$wt" "$P_DUR"
-  fmt_piece "$P_NAME" "$P_REPS" "$wt" "$P_DUR"; printf '\n'
 }
 
 
@@ -871,16 +881,24 @@ alert_for() {
     "$(( DIALOG_TIMEOUT + 60 ))" "$(esc "$title")" "$(esc "$1")" "$DIALOG_TIMEOUT"
 }
 
-# Asked when what you typed is not a movement this tool knows. The alternative
-# was guessing, and guessing merged two real movements without saying so.
-confirm_new_for() {
-  printf 'with timeout of %s seconds\n  tell application "System Events"\n    activate\n    set r to display alert "New movement" message "Add \\"%s\\" to your pool?" buttons {"Cancel", "Add it"} default button "Add it" giving up after 120\n    if gave up of r then\n      return "__TIMEOUT__"\n    else\n      return button returned of r\n    end if\n  end tell\nend timeout\n' \
-    "180" "$(esc "$1")"
+# Asked when what you typed names a movement this tool does not know. The
+# alternative was guessing, and guessing merged two real movements without
+# saying so. The whole line comes back in a text field: a misspelling is
+# fixed in place and resolves, a new movement is logged as typed. Answers
+# "<button><TAB><text>", or __CANCEL__ / __TIMEOUT__.
+#
+# A button named "Cancel" does not return from `display dialog`, it raises
+# error -128 -- hence the try block. Without it osascript printed nothing,
+# and nothing is what a dialog that failed to open prints too.
+new_for() {   # UNKNOWN_NAME TYPED_LINE
+  printf 'with timeout of 180 seconds\n  tell application "System Events"\n    activate\n    try\n      set r to display dialog "\\"%s\\" is not a movement I know. Fix the spelling, or log it as it is. Add to pool also offers it every day." default answer "%s" with title "New movement" buttons {"Cancel", "Add to pool", "Log it"} default button "Log it" giving up after 120\n    on error number -128\n      return "__CANCEL__"\n    end try\n    if gave up of r then\n      return "__TIMEOUT__"\n    else\n      return (button returned of r) & tab & (text returned of r)\n    end if\n  end tell\nend timeout\n' \
+    "$(esc "$1")" "$(esc "$2")"
 }
 
 # Prefilled with the suggestion, so "same movement, different count" is one
-# edit. `display dialog` also carries its own timeout.
+# edit. `display dialog` also carries its own timeout. Same -128 rule as
+# new_for: Cancel is an error, not a button.
 other_for() {
-  printf 'with timeout of 360 seconds\n  tell application "System Events"\n    activate\n    set r to display dialog "What did you do?" default answer "%s" with title "%s" buttons {"Cancel", "Log it"} default button "Log it" giving up after 300\n    if button returned of r is "Cancel" then\n      return "__CANCEL__"\n    else\n      return text returned of r\n    end if\n  end tell\nend timeout\n' \
+  printf 'with timeout of 360 seconds\n  tell application "System Events"\n    activate\n    try\n      set r to display dialog "What did you do? Put and or ; between sets." default answer "%s" with title "%s" buttons {"Cancel", "Log it"} default button "Log it" giving up after 300\n    on error number -128\n      return "__CANCEL__"\n    end try\n    if gave up of r then\n      return "__TIMEOUT__"\n    else\n      return text returned of r\n    end if\n  end tell\nend timeout\n' \
     "$(esc "$1")" "$(esc "$title")"
 }

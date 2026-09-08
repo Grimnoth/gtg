@@ -321,7 +321,9 @@ or: $hint"
     "Other...")
       typed=$(osa "$(other_for "$line")")
       case "$typed" in
-        ""|"__CANCEL__") note "other: cancelled"; exit 0 ;;
+        "")            note "ERROR: text dialog did not display"; exit 1 ;;
+        "__CANCEL__")  note "other: cancelled"; exit 0 ;;
+        "__TIMEOUT__") note "other: unanswered"; exit 0 ;;
       esac
       line="$typed"
 
@@ -339,46 +341,47 @@ or: $hint"
           fi ;;
       esac
 
-      # A round separated by ";" or "|" is several sets, and is all-or-nothing:
-      # confirming a NEW movement mid-round would mean a dialog per movement,
-      # so a round has to be built from movements already known.
-      round=
-      case "$line" in *\;*|*\|*) round=1 ;; esac
-
+      # One movement or a whole round, "and" or ";" between sets: everything
+      # typed goes through record_batch, checked in full so nothing half-lands.
+      #
+      # A movement it does not know is a QUESTION, not a guess -- the old
+      # code silently snapped it to whatever known name was within an edit
+      # distance of two, which quietly merged "Incline Press" into "Decline
+      # Press". The line comes back in a text field: fix the spelling and it
+      # resolves, or log it as typed and the log is what makes it known from
+      # then on. "Add to pool" also offers it every day.
+      #
+      # Bounded: once "Log it" or "Add to pool" is pressed an unknown name is
+      # accepted, so the retry can only fail by being unreadable, which exits.
+      #
       # Falls THROUGH on success, so the debounce stamp below still gets
       # written -- a logged round is an answered nudge. Only a failure exits
       # early, unstamped, the same way every other failure here does, so the
       # next fire tries again rather than counting a rejection as done.
-      if [ -n "$round" ]; then
-        if out=$(record_batch "$line" "$where"); then
-          note "logged (round): $(printf '%s' "$out" | paste -sd';' -)"
+      GTG_NEW=""; tab=$(printf '\t')
+      while :; do
+        err=$(mktemp)
+        out=$(record_batch "$line" "$where" 2>"$err"); rc=$?
+        if [ "$rc" -eq 0 ]; then
+          rm -f "$err"
           line=$(printf '%s' "$out" | paste -sd';' -)
-        else
-          note "round rejected, nothing written: an unknown movement in \"$line\""
-          exit 0
+          note "logged${GTG_NEW:+ (new movement)}: $line"
+          break
         fi
-      # A movement we know is logged straight away. One we do not know is a
-      # QUESTION, not a guess -- the old code silently snapped it to whatever
-      # known name was within an edit distance of two, which quietly merged
-      # "Incline Press" into "Decline Press". Confirming adds it to the pool,
-      # so the set of movements is something you extend on purpose.
-      elif out=$(record_typed "$line" "$where"); then
-        note "logged (typed): $out"
-      elif [ $? -eq 3 ]; then
-        read_piece "$line"
-        pretty=$(fmt_piece "$P_NAME" "$P_REPS" "$P_WT" "$P_DUR")
+        unknown=$(sed -n 's/^unknown movement: //p' "$err" | head -1); rm -f "$err"
+        if [ "$rc" -ne 3 ]; then note "could not read that as a movement: $line"; exit 0; fi
         # Three different non-answers, three different lines. "declined" once
         # covered all of them, and for three weeks it was recording a prompt
         # that had failed to compile as a person clicking Cancel.
-        case "$(osa "$(confirm_new_for "$pretty")")" in
-          "Add it")      note "logged (new movement): $(record_new "$line" "$where")" ;;
-          "Cancel")      note "unknown movement declined: $P_NAME"; exit 0 ;;
-          "__TIMEOUT__") note "unknown movement, add prompt unanswered: $P_NAME"; exit 0 ;;
-          *)             note "ERROR: add prompt did not display for: $P_NAME"; exit 1 ;;
+        reply=$(osa "$(new_for "$unknown" "$line")")
+        case "$reply" in
+          "__CANCEL__")        note "unknown movement declined: $unknown"; exit 0 ;;
+          "__TIMEOUT__")       note "unknown movement, prompt unanswered: $unknown"; exit 0 ;;
+          "Log it$tab"*)       GTG_NEW=log;  line=${reply#*"$tab"} ;;
+          "Add to pool$tab"*)  GTG_NEW=pool; line=${reply#*"$tab"} ;;
+          *)                   note "ERROR: new-movement prompt did not display for: $unknown"; exit 1 ;;
         esac
-      else
-        note "could not read that as a movement: $line"; exit 0
-      fi
+      done
       ;;
     *)  # "Did it"
       # Through record_option, not record: the line on screen may carry an

@@ -98,25 +98,25 @@ is "exact wins over substring" "$(resolve_movement 'pull-ups')"     "pull-ups"
 
 echo "== no splitting on separators =="
 reset_plan
-out=$(record_typed 'stairs, 2 flights' away); is "shipped away option stays one set" "$out" "stairs, 2 flights"
+out=$(record_batch 'stairs, 2 flights' away); is "shipped away option stays one set" "$out" "stairs, 2 flights"
 is "  and it is one row" "$(wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' ')" "1"
 
 echo "== weight memory =="
 reset_plan
-record_typed 'kettlebell swings x10 @ 50 lb' home >/dev/null
-is "inherits"      "$(record_typed 'kettlebell swings x10' home)" "kettlebell swings x10 @ 50 lb"
-record_typed 'kettlebell swings x10 @ 70 lb' home >/dev/null
-is "override sticks" "$(record_typed 'kettlebell swings x10' home)" "kettlebell swings x10 @ 70 lb"
-is "no cross-movement leak" "$(record_typed 'pull-ups x5' home)" "pull-ups x5"
+record_batch 'kettlebell swings x10 @ 50 lb' home >/dev/null
+is "inherits"      "$(record_batch 'kettlebell swings x10' home)" "kettlebell swings x10 @ 50 lb"
+record_batch 'kettlebell swings x10 @ 70 lb' home >/dev/null
+is "override sticks" "$(record_batch 'kettlebell swings x10' home)" "kettlebell swings x10 @ 70 lb"
+is "no cross-movement leak" "$(record_batch 'pull-ups x5' home)" "pull-ups x5"
 
 echo "== duration is NOT inherited =="
 reset_plan
-record_typed 'farmer walk 1 min' home >/dev/null
-is "2 min stays 2 min" "$(record_typed 'farmer walk 2 min' home)" "farmer walk 2 min"
+record_batch 'farmer walk 1 min' home >/dev/null
+is "2 min stays 2 min" "$(record_batch 'farmer walk 2 min' home)" "farmer walk 2 min"
 
 echo "== unknown movement is refused, not guessed =="
 reset_plan
-record_typed 'sled push x5' home >/dev/null 2>&1; is "returns 3" "$?" "3"
+record_batch 'sled push x5' home >/dev/null 2>&1; is "returns 3" "$?" "3"
 is "  and wrote nothing" "$(wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' ')" "0"
 
 echo "== extending the pool =="
@@ -124,7 +124,7 @@ reset_plan
 plan_add 'sled push x5 @ 90 lb' every; is "plan_add ok" "$?" "0"
 is "now resolves"  "$(resolve_movement 'sled push')" "sled push"
 plan_add 'sled push x5 @ 90 lb' every; is "duplicate refused (rc 2)" "$?" "2"
-is "and logs"      "$(record_typed 'sled push x5' home)" "sled push x5 @ 90 lb"
+is "and logs"      "$(record_batch 'sled push x5' home)" "sled push x5 @ 90 lb"
 
 echo "== backfill never writes the live log =="
 reset_plan
@@ -180,7 +180,7 @@ is "gtg <text>: no not-found" "$(printf '%s' "$out" | grep -c 'not found')" "0"
 
 # Every function the shipped commands reference must actually exist.
 missing=0
-for fn in record record_option record_typed record_new resolve_movement \
+for fn in record record_option record_batch new_for resolve_movement \
           known_movements plan_add last_weight_for read_piece parse_piece \
           fmt_piece fmt_dur fmt_wt decorate_weights today_options; do
   declare -f "$fn" >/dev/null 2>&1 || { missing=$((missing+1)); echo "         missing: $fn"; }
@@ -234,9 +234,9 @@ unset GTG_AT
 is "the row carries the time given" "$(cut -f1 <"$GTG_STATE_DIR/log.tsv")" "${yest}T07:00:00"
 
 reset_plan
-record_typed 'kettlebell swings x10 @ 50 lb' home >/dev/null
+record_batch 'kettlebell swings x10 @ 50 lb' home >/dev/null
 export GTG_AT="${yest}T07:00:00"
-record_typed 'kettlebell swings x10 @ 20 lb' home >/dev/null
+record_batch 'kettlebell swings x10 @ 20 lb' home >/dev/null
 unset GTG_AT
 is "a backdated set cannot redefine the current weight" \
   "$(last_weight_for 'kettlebell swings')" "50lb"
@@ -255,7 +255,7 @@ reset_plan
 is "pipe separates too" \
   "$(record_batch 'pull-ups x5 | push-ups x20' home >/dev/null; wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' ')" "2"
 
-# The same rule record_typed has, and for the same reason: the shipped option
+# The same rule record_batch has, and for the same reason: the shipped option
 # `stairs, 2 flights` is one movement whose name contains a comma.
 reset_plan
 record_batch 'stairs, 2 flights' away >/dev/null
@@ -267,6 +267,67 @@ reset_plan
 record_batch 'pull-ups x5; sled push x5; push-ups x20' home >/dev/null 2>&1
 is "an unknown movement rejects the whole round" "$?" "3"
 is "  and writes nothing at all" "$(wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' ')" "0"
+
+echo "== \"and\" separates a round =="
+# The word a round gets dictated with. "clean and press" would be torn in
+# two, and no pool has one -- see the ponytail on record_batch.
+reset_plan
+record_batch 'pull-ups x5 and push-ups x20 AND 10 air squats' home >/dev/null
+is "three rows, any case" "$(rows)" "3"
+reset_plan
+record_batch 'pull-ups x5 & push-ups x20' home >/dev/null
+is "so does &" "$(rows)" "2"
+reset_plan
+record_batch 'pull-ups x5;push-ups x20 and 10 air squats' home >/dev/null
+is "mixed with ;" "$(rows)" "3"
+
+echo "== a trailing \"for\" is not part of the name =="
+# "Soccer / Running for 20 minutes" logged a movement called "Running for".
+read_piece 'Soccer / Running for 20 minutes'
+is "name"     "$P_NAME" "Soccer / Running"
+is "duration" "$P_DUR"  "1200"
+is "key matches without it" \
+  "$(printf 'running for 20 min\n' | awk "$AWK_KEY"'{print key($0)}')" \
+  "$(printf 'running\n' | awk "$AWK_KEY"'{print key($0)}')"
+
+echo "== GTG_NEW logs what it does not know, as typed =="
+reset_plan
+GTG_NEW=log record_batch 'pull-ups x5; sled push x5' home >/dev/null 2>&1; is "accepted" "$?" "0"
+is "  both rows"         "$(rows)" "2"
+is "  named as typed"    "$(tail -1 "$GTG_STATE_DIR/log.tsv" | cut -f2)" "sled push"
+is "  pool untouched"    "$(grep -c 'sled push' "$GTG_CONF_DIR/plan.txt")" "0"
+is "  known from now on" "$(resolve_movement 'sled push')" "sled push"
+record_batch 'sled push x5' home >/dev/null 2>&1; is "  so the plain form logs it" "$?" "0"
+reset_plan
+GTG_NEW=pool record_batch 'plank 1 min' home >/dev/null 2>&1; is "GTG_NEW=pool accepted" "$?" "0"
+is "  row written" "$(rows)" "1"
+is "  and offered" "$(plan_line every | grep -c 'plank 1 min')" "1"
+reset_plan
+record_batch 'sled push x5' home >"$TMP/o" 2>"$TMP/e"
+is "refusal names it on stderr" "$(sed -n 's/^unknown movement: //p' "$TMP/e")" "sled push"
+is "  and the fix" "$(grep -c -- '--new' "$TMP/e")" "1"
+
+echo "== a piece carries its own time =="
+# A morning done at two times, typed as one line.
+reset_plan
+y=$(date -v-1d '+%Y-%m-%d')
+record_batch '@yesterday 7:15 pull-ups x5; @yesterday 7:40 push-ups x20 and 10 air squats' home >/dev/null 2>&1
+is "three rows" "$(rows)" "3"
+is "each at its own time" "$(cut -f1 "$GTG_STATE_DIR/log.tsv" | paste -sd, -)" \
+   "${y}T07:15:00,${y}T07:40:00,${y}T07:40:01"
+record_batch '@nonsense pull-ups x5' home >/dev/null 2>&1; is "an unreadable time is an error (rc 1)" "$?" "1"
+is "  that wrote nothing" "$(rows)" "3"
+is "GTG_AT is left as it was" "${GTG_AT:-unset}" "unset"
+
+echo "== gtg --new and --offer =="
+reset_plan
+./bin/gtg 'sled push x5' >/dev/null 2>"$TMP/e"; is "plain gtg refuses (rc 1)" "$?" "1"
+is "  naming it" "$(grep -c '^unknown movement: sled push' "$TMP/e")" "1"
+out=$(./bin/gtg --new 'sled push x5' 2>&1); is "--new logs it" "$?" "0"
+is "  and says so" "$(printf '%s' "$out" | grep -c '^logged: sled push x5')" "1"
+out=$(./bin/gtg --offer '@yesterday 6am plank 1 min' 2>&1); is "--offer with a time" "$?" "0"
+is "  lands at six"   "$(tail -1 "$GTG_STATE_DIR/log.tsv" | cut -f1)" "${y}T06:00:00"
+is "  and is offered" "$(plan_line every | grep -c 'plank 1 min')" "1"
 
 echo "== a fire that decides to stay quiet still says so =="
 # The two checks that exit without nudging used to exit silently, so an absent
@@ -305,11 +366,17 @@ echo "== today shows the spread across the day =="
 reset_plan
 sed -i '' "s/^WAKE_START=.*/WAKE_START=0/; s/^WAKE_END=.*/WAKE_END=24/" "$GTG_CONF_DIR/plan.txt"
 export GTG_AT="$(date '+%Y-%m-%d')T00:05:00"
-record_typed 'pull-ups x5' home >/dev/null
+record_batch 'pull-ups x5' home >/dev/null
 unset GTG_AT
 is "one set, one hour, of the hours so far" \
   "$(./bin/gtg today | grep -c "in 1 of $(( $(date +%-H) + 1 )) waking hours")" "1"
 is "  and the strip marks hour 00" "$(./bin/gtg today | grep -c '^  00 ')" "1"
+# A set before WAKE_START is the kind this tool most wants, so the strip
+# reaches back to it rather than reading "0 of 0" all morning.
+sed -i '' "s/^WAKE_START=.*/WAKE_START=9/" "$GTG_CONF_DIR/plan.txt"
+is "a set before the window still counts" \
+  "$(./bin/gtg today | grep -c "in 1 of $(( $(date +%-H) + 1 )) waking hours")" "1"
+is "  and widens the strip to reach it" "$(./bin/gtg today | grep -c '^  00 ')" "1"
 
 echo "== fires: what happened to every nudge =="
 reset_plan
@@ -376,8 +443,8 @@ is "the event carries the set's own time" \
 # The rows the sync feeds the calendar. A timed set has an EMPTY reps column,
 # and the first sync read "home" into it and wrote "dead hang xhome".
 reset_plan
-record_typed 'farmer walk 1 min' home >/dev/null
-record_typed 'kettlebell swings x10 @ 50 lb' away >/dev/null
+record_batch 'farmer walk 1 min' home >/dev/null
+record_batch 'kettlebell swings x10 @ 50 lb' away >/dev/null
 record_option 'pull-ups x5' home skip >/dev/null
 is "empty reps do not shift the columns" "$(sync_rows 1 | head -1 | cut -f1,3)" "farmer walk 1 min	home"
 is "weight rides along"                  "$(sync_rows 1 | sed -n 2p | cut -f1,3)" "kettlebell swings x10 @ 50 lb	away"
@@ -389,19 +456,24 @@ echo "== every dialog compiles =="
 # osascript's stderr is discarded and its empty answer read as "declined".
 # The name carries a double quote so esc() is on the path as well.
 title="GTG"; DIALOG_TIMEOUT=900
-for d in alert_for other_for confirm_new_for; do
+for d in alert_for other_for new_for; do
   if "$d" 'Bulgarian "split" squats x10' | osacompile -o "$TMP/$d.scpt" 2>"$TMP/$d.err"; then
     ok "$d compiles"
   else
     bad "$d compiles" "$(head -1 "$TMP/$d.err")" "clean compile"
   fi
 done
-is "the add prompt names the movement" \
-  "$(confirm_new_for 'Bulgarian split squats x10' | grep -c 'Add \\"Bulgarian split squats x10\\" to your pool')" "1"
+is "the new-movement prompt names it and prefills the line" \
+  "$(new_for 'plank' '@7:40 plank 1 min' | grep -c '\\"plank\\" is not a movement I know.*default answer "@7:40 plank 1 min"')" "1"
+if new_for 'x' 'a "quoted" line' | osacompile -o "$TMP/new_for2.scpt" 2>"$TMP/new_for2.err"; then
+  ok "new_for compiles with a quote in the line"
+else
+  bad "new_for compiles with a quote in the line" "$(head -1 "$TMP/new_for2.err")" "clean compile"
+fi
 
 echo "== readers run clean =="
 reset_plan
-record_typed 'pull-ups x5' home >/dev/null
+record_batch 'pull-ups x5' home >/dev/null
 # `nudges` must survive an empty nudge log rather than erroring on it.
 for c in today week stats options plan nudges; do
   ./bin/gtg "$c" >/dev/null 2>&1 && ok "gtg $c" || bad "gtg $c" "nonzero" "0"

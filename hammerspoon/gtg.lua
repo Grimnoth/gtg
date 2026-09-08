@@ -63,14 +63,32 @@ local function logNow()
   report(sh({}))
 end
 
+-- One typed line, wherever it was typed. A movement the CLI does not know
+-- comes back as a question with the line in a text field: fix the spelling
+-- and it resolves, or log it as it is and the log is what makes it known
+-- from then on. Before this, the box showed a terminal command and stopped.
+local function logText(text)
+  local out = sh({ text })
+  local unknown = out:match("unknown movement: ([^\n]+)")
+  if not unknown then return out end
+  local btn, edited = hs.dialog.textPrompt(
+    "New movement: " .. unknown,
+    "Not one it knows yet. Fix the spelling, or log it as it is.\n" ..
+    "(gtg add \"...\" in a terminal also offers it every day.)",
+    text, "Log it", "Cancel")
+  edited = trim(edited or "")
+  if btn ~= "Log it" or edited == "" then return "not logged: " .. unknown end
+  return sh({ "--new", edited })
+end
+
 local function logOther()
   local btn, text = hs.dialog.textPrompt(
     "Log a set",
-    "What did you do? Separate a whole round with \";\".\n" ..
-    "e.g.  10 ring crunches; pull-ups x5; dead hang 30s",
+    "What did you do? \"and\" or \";\" between sets.\n" ..
+    "e.g.  10 ring crunches and pull-ups x5 and dead hang 30s",
     "", "Log it", "Cancel")
   if btn ~= "Log it" or trim(text) == "" then return end
-  report(sh({ text }))
+  report(logText(text))
 end
 
 -- The reason this whole thing exists: a round done in the kitchen before you
@@ -78,28 +96,28 @@ end
 -- you answer it. And memory logged about none of them: two or three sets most
 -- mornings, and the log shows almost nothing before the first nudge.
 --
--- So it asks. One box per set or round, and it asks again until you say that
--- is all, because the morning is usually more than one thing at more than one
--- time. Each line is handed over whole, as ONE argument: the CLI pulls the
--- @time off itself, and it is the only thing that should, since a multi-word
--- time ("yesterday 7am") needs the same longest-prefix rule the terminal uses.
+-- So it asks. ONE box, the whole morning in one line: "and" between sets,
+-- and each set may carry its own @time. It used to ask again after every
+-- entry until you said that was all, and that second box was the complaint.
+-- The line is handed over whole, as ONE argument: the CLI pulls the @times
+-- off itself, and it is the only thing that should, since a multi-word time
+-- ("yesterday 7am") needs the same longest-prefix rule the terminal uses.
 --
 -- Every showing is stamped into the nudge log through `gtg note`, so
 -- `gtg fires` can say how often this fires and how much it catches.
 local function catchUp(reason)
   sh({ "note", "catch-up shown (" .. reason .. ")" })
   local logged = 0
-  while true do
-    local btn, text = hs.dialog.textPrompt(
-      "Before you sat down?",
-      "Anything done away from the desk? Start with the time.\n" ..
-      "e.g.  @7:15 10x bulgarian split squats\n" ..
-      "      @8am pull-ups x5; dead hang 30s\n" ..
-      "Times: 8am  8:00  -90m  \"yesterday 7am\"",
-      "@", "Log it", "That's all")
-    text = trim(text or "")
-    if btn ~= "Log it" or text == "" or text == "@" then break end
-    local out = sh({ text })
+  local btn, text = hs.dialog.textPrompt(
+    "Before you sat down?",
+    "Everything done away from the desk, in one line. Start with the time,\n" ..
+    "\"and\" between sets, another @time where the time changed.\n" ..
+    "e.g.  @7:15 pull-ups x5 and @7:40 ring dips x5 and dead hang 30s\n" ..
+    "Times: 8am  8:00  -90m  \"yesterday 7am\"",
+    "@", "Log it", "Nothing")
+  text = trim(text or "")
+  if btn == "Log it" and text ~= "" and text ~= "@" then
+    local out = logText(text)
     report(out)
     for _ in out:gmatch("logged: ") do logged = logged + 1 end
   end

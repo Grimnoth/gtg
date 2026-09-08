@@ -34,7 +34,7 @@ def norm_ex(ex):
     s = re.sub(r"\d+(\.\d+)?\s*(lbs?|kgs?|#)", " ", s)
     s = re.sub(r"\d+(\.\d+)?\s*(minutes?|mins?|seconds?|secs?)", " ", s)
     s = re.sub(r"\d+\s*s(?![a-z])", " ", s)
-    s = re.sub(r"\s+(total|each|per hand|with|of)(\s|$)", " ", s)
+    s = re.sub(r"\s+(total|each|per hand|with|of|for)(\s|$)", " ", s)
     s = re.sub(r"\s*x\d+(\s|$)", " ", s)
     s = re.sub(r"(^|\s)\d+\s*x(\s|$)", " ", s)
     s = re.sub(r"@", " ", s)
@@ -56,7 +56,7 @@ def clean_ex(ex):
     s = re.sub(r"\s+\d+\s*$", "", s)
     s = re.sub(r"\s+-\s+", " ", s)
     s = re.sub(r"[,@]", " ", s)
-    s = re.sub(r"\s+(total|each|per hand|with|of)\s*$", "", s, flags=re.I)
+    s = re.sub(r"\s+(total|each|per hand|with|of|for)\s*$", "", s, flags=re.I)
     return re.sub(r"\s+", " ", s).strip() or ex
 
 
