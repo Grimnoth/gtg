@@ -306,6 +306,11 @@ time**, and the picker says so up front -- the preselected option reads
 typed. Naming a different weight overrides it, and from then on the new one is
 what gets remembered.
 
+**The count is remembered the same way.** A pool entry with no count, such as
+`bulgarian split squats`, was offered bare, and **Did it** logged a set with
+no reps. Now it reads `bulgarian split squats x5` once you have logged five,
+and a new count overrides it from then on. A timed movement never gets one.
+
 **Duration is deliberately not inherited.** Duration is the thing you vary, so
 assuming last time's would quietly log a set you did not do. Weight is a
 property of the equipment; duration is a property of the effort.

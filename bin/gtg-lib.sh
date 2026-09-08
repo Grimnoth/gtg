@@ -186,14 +186,24 @@ today_options() {
     | decorate_weights
 }
 
-# Append the remembered weight to any option that does not name one, so the
-# picker reads "kettlebell swings x10 @ 50 lb" and "Did it" logs the weight
-# without a word typed. The decorated string round-trips: parse_piece takes
-# the "@ 50 lb" back off when the row is written.
+# Append the remembered weight, and the remembered count, to any option that
+# does not name them, so the picker reads "kettlebell swings x10 @ 50 lb" and
+# "Did it" logs both without a word typed. The decorated string round-trips:
+# parse_piece takes the "x10" and the "@ 50 lb" back off when the row is
+# written.
+#
+# The count came later than the weight, and for the same reason: a pool
+# entry without one ("bulgarian split squats") was offered bare, "Did it"
+# logged a set with no reps, and the question was "how does it know how
+# many?". It does not; it remembers. A timed movement never gets a count.
 decorate_weights() {
-  local opt wt
+  local opt wt reps
   while IFS= read -r opt; do
     read_piece "$opt"
+    if [ -z "$P_REPS" ] && [ -z "$P_DUR" ]; then
+      reps=$(last_reps_for "$P_NAME")
+      [ -n "$reps" ] && opt="$opt x$reps"
+    fi
     if [ -z "$P_WT" ]; then
       wt=$(last_weight_for "$P_NAME")
       [ -n "$wt" ] && opt="$opt @ $(fmt_wt "$wt")"
@@ -353,6 +363,18 @@ last_weight_for() {
   fi
   [ -n "$w" ] || w=$(plan_weight_for "$1")
   printf '%s' "$w"
+}
+
+# The count you last did of a movement, or nothing. Same rule as the weight,
+# tie-break included, and read from the log only: a plan entry with a count
+# already carries it, so there is nothing to fall back to.
+last_reps_for() {
+  [ -s "$LOG" ] || return 0
+  awk -F'\t' -v target="$1" "$AWK_KEY"'
+    BEGIN { want = key(target) }
+    $3 ~ /^[0-9]+$/ && key($2) == want && $1 >= seen { seen = $1; r = $3 }
+    END { if (r != "") printf "%s", r }
+  ' "$LOG"
 }
 
 # The weight declared in a plan entry for a movement, or nothing.

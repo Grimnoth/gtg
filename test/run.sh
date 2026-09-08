@@ -109,6 +109,20 @@ record_batch 'kettlebell swings x10 @ 70 lb' home >/dev/null
 is "override sticks" "$(record_batch 'kettlebell swings x10' home)" "kettlebell swings x10 @ 70 lb"
 is "no cross-movement leak" "$(record_batch 'pull-ups x5' home)" "pull-ups x5"
 
+echo "== the count is remembered, like the weight =="
+reset_plan
+plan_add 'bulgarian split squats' every >/dev/null
+is "offered bare before any set" "$(today_options home | grep -c '^bulgarian split squats$')" "1"
+record_batch 'bulgarian split squats x5' home >/dev/null
+is "offered with the count after" "$(today_options home | grep -c '^bulgarian split squats x5$')" "1"
+is "  and Did it logs it" "$(record_option 'bulgarian split squats x5' home)" "bulgarian split squats x5"
+is "  as reps, not name" "$(tail -1 "$GTG_STATE_DIR/log.tsv" | cut -f2,3)" "$(printf 'bulgarian split squats\t5')"
+record_batch 'bulgarian split squats x8' home >/dev/null
+is "a new count overrides" "$(last_reps_for 'bulgarian split squats')" "8"
+record_batch 'farmer walk 1 min' home >/dev/null
+is "a timed movement gets no count" "$(last_reps_for 'farmer walk')" ""
+is "  in the picker either" "$(today_options home | grep -c '^farmer walk 1 min x')" "0"
+
 echo "== duration is NOT inherited =="
 reset_plan
 record_batch 'farmer walk 1 min' home >/dev/null
