@@ -380,17 +380,22 @@ or: $hint"
       # written -- a logged round is an answered nudge. Only a failure exits
       # early, unstamped, the same way every other failure here does, so the
       # next fire tries again rather than counting a rejection as done.
-      GTG_NEW=""; tab=$(printf '\t')
+      GTG_NEW=""; reading=""; tab=$(printf '\t')
       while :; do
         err=$(mktemp)
-        out=$(record_batch "$line" "$where" 2>"$err"); rc=$?
+        out=$(record_smart "$line" "$where" 2>"$err"); rc=$?
+        reading=$(sed -n 's/^read as: //p' "$err" | head -1)
         if [ "$rc" -eq 0 ]; then
           rm -f "$err"
           line=$(printf '%s' "$out" | paste -sd';' -)
-          note "logged${GTG_NEW:+ (new movement)}: $line"
+          note "logged${GTG_NEW:+ (new movement)}${reading:+ (read as: $reading)}: $line"
           break
         fi
         unknown=$(sed -n 's/^unknown movement: //p' "$err" | head -1); rm -f "$err"
+        # The box comes back holding the READING when there is one. A
+        # sentence the model turned into "sled push x5" is one word from being
+        # right; handing back the raw dictation makes it be retyped instead.
+        [ -n "$reading" ] && line="$reading"
         if [ "$rc" -ne 3 ]; then note "could not read that as a movement: $line"; exit 0; fi
         # Three different non-answers, three different lines. "declined" once
         # covered all of them, and for three weeks it was recording a prompt

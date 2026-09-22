@@ -116,6 +116,57 @@ local function logText(text)
   return sh({ "--new", edited })
 end
 
+-- SAY IT. One key, speak, done.
+--
+-- The lowest-friction path there is, and the whole reason the interpreter
+-- exists: speech arrives as sentences, and the strict parser was built for
+-- commands. "ten ring dips and a thirty second back stretch with the
+-- kettlebell" comes back from the recogniser as "10 ring dips and a 32nd
+-- backstretch with a kettlebell", which nothing made of regular expressions
+-- was ever going to read.
+--
+-- hs.task, never hs.execute: this takes seconds, and the rule this menu is
+-- built around is that nothing blocks Hammerspoon's main thread.
+local listening = false
+local function sayIt()
+  if listening then return end
+  listening = true
+  local box = hs.alert.show("MIC  listening...", true)
+  local ping = hs.sound.getByName("Ping")
+  if ping then ping:play() end
+
+  local t = hs.task.new(GTG, function(_, out, err)
+    listening = false
+    if box then hs.alert.closeSpecific(box) end
+    -- What LANDED, from stdout. The CLI's stderr carries progress, and on a
+    -- failure the reason, so it is shown only when nothing was logged.
+    local msg = trim(out or "")
+    if msg == "" then
+      for line in trim(err or ""):gmatch("[^\n]+") do
+        if not line:match("^listening") and not line:match("^installing") then msg = line end
+      end
+    end
+    hs.alert.show(msg ~= "" and msg or "nothing heard", 3)
+    refresh()
+  end, function(_, _, err)
+    -- Streaming, so the box stops claiming to listen once it has stopped. One
+    -- that still says "listening" while a model reads the line teaches you to
+    -- talk over it.
+    local heard = err and err:match("heard: ([^\n]+)")
+    if heard and box then
+      hs.alert.closeSpecific(box)
+      box = hs.alert.show('"' .. heard .. '"', true)
+    end
+    return true
+  end, { "say" })
+
+  if not t or not t:start() then
+    listening = false
+    if box then hs.alert.closeSpecific(box) end
+    hs.alert.show("could not start gtg say", 3)
+  end
+end
+
 local function logOther()
   local btn, text = hs.dialog.textPrompt(
     "Log a set",
@@ -288,6 +339,9 @@ local function buildMenu()
   if snap.pick ~= "" then
     items[#items + 1] = { title = "Did " .. snap.pick, fn = logNow }
   end
+  -- First of the typing-free options and named with its key, because the
+  -- point of it is never having to open this menu again.
+  items[#items + 1] = { title = "Say a set…   ⌃⌥⌘V", fn = sayIt }
   items[#items + 1] = { title = "Log something else…", fn = logOther }
   items[#items + 1] = { title = "Log what I did before sitting down…", fn = function() catchUp("menu") end }
   items[#items + 1] = { title = "-" }
@@ -332,10 +386,15 @@ function M.start()
   if M.power then M.power:stop() end
   M.power = hs.caffeinate.watcher.new(onPower)
   M.power:start()
+  -- Deleted and rebound rather than added to, so re-running this by hand does
+  -- not leave two bindings racing for one key.
+  if M.hotkey then M.hotkey:delete() end
+  M.hotkey = hs.hotkey.bind({ "ctrl", "alt", "cmd" }, "V", sayIt)
   refresh()
 end
 
 M.catchUp = catchUp
+M.sayIt = sayIt
 
 M.start()
 

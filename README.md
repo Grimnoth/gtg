@@ -11,7 +11,13 @@ plist on top of them.
 ```sh
 brew install ical-buddy     # optional, enables meeting detection
 ./install.sh                # run it while on your home network
+gtg mic                     # pick a microphone before the first `gtg say`
 ```
+
+`gtg say` needs `swiftc` (Xcode, or its command line tools) to compile the
+recogniser at install time, and is skipped with a note when that is missing.
+A binary you can read the source of and build yourself is worth more here than
+one you would have to trust.
 
 `install.sh` is idempotent. Re-run it after editing anything in `bin/`.
 
@@ -24,6 +30,8 @@ gtg "rows x10" log whatever you actually did
 gtg "a; b; c"  log a whole round, ";" between movements
 gtg @8am ...   log a set you did earlier (see below)
 gtg when 8am   show how a time would be read, logging nothing
+gtg say        press, speak, done
+gtg mic        which microphone it listens on (gtg mic 3 to pick)
 gtg options    list today's choices
 gtg off        no more nudges today (gtg off sick, gtg off 2h, gtg off 3d)
 gtg on         start them again
@@ -196,6 +204,135 @@ measured before it was trusted: two throwaway jobs, one with the key and one
 without, and only one child survived. Re-run `install.sh` after pulling this
 so the loaded job carries it.
 
+## Say it
+
+Press `⌃⌥⌘V`, say what you did, and stop talking. That is the whole thing.
+No window to find, no field to focus, nothing typed. It stops by itself about
+a second and a half after you stop speaking, so there is no second press to
+remember either. A set remembered at the top of the stairs is a set logged.
+
+```sh
+gtg say     the same from a terminal
+gtg mic     which microphone it listens on
+```
+
+The recogniser is the one macOS 26 ships, running **on this Mac**. No API key,
+no account, no model to download by hand, and the audio never leaves the
+machine. A microphone is the most invasive thing a small tool can ask for, and
+the answer here is that nothing it hears is ever sent anywhere.
+
+**Run `gtg mic` before the first use.** The system default input is very often
+the wrong one and fails silently: on this Mac it is an audio interface with
+nothing plugged into it, which records a flat -71 dB. Worse, that interface
+has loopback channels, so the first thing this ever transcribed was the
+podcast playing through it. `gtg mic 3` writes the choice into `plan.txt`.
+
+When it hears nothing it says which of the two happened -- a room that stayed
+quiet, or a device that is not connected to anything -- because only one of
+those is worth going to fix.
+
+What comes back is a sentence, and that is the point of the next section.
+Speaking "ten ring dips and a thirty second back stretch with the kettlebell"
+produced, word for word:
+
+```
+10 ring dips and a 32nd backstretch with a kettlebell.
+```
+
+## When it does not know the words
+
+A closed set of movements and a strict grammar work beautifully while the
+input is a **command**. They fall apart the moment it is a **sentence**, and
+three rows in the log say so:
+
+| typed or spoken | what landed |
+| --- | --- |
+| `30-second back stretch with kettlebell` | refused, then hand-fixed into a row saying **30 reps** of a movement that has been 30 **seconds** every other time |
+| `7am Ring Dips x5` | a movement named `7am Ring Dips` |
+| `ring dips weight + 34lb` | a movement named `Ring Dips Weight +` |
+
+The first one is the clearest. `30-second` keeps its hyphen, so the duration
+strip does not fire and the number stays welded to the name. And the words
+left off are at the front **and** the back at once, which is exactly what
+neither prefix nor substring matching can reach. That is not a bug in the
+matcher. It is a sentence meeting a parser.
+
+So a line the parser cannot read gets **one** more reader before it is
+refused: `claude -p` on the subscription already being paid for, which
+rewrites it into the syntax above.
+
+```
+30-second back stretch with kettlebell
+  -> read as: kettlebell back stretch 30s
+```
+
+### The model never writes to the log
+
+It rewrites the line, and the rewritten line goes straight back through
+`record_batch`, which checks it exactly as it checks anything typed. So:
+
+- a movement it already understands **never goes near a model**, and is logged
+  by the parser as before;
+- an invented movement gets the same **New movement** box a typo gets;
+- a reader that is off, slow, or broken lands on the same refusal, word for
+  word, that this tool gave before any of it existed.
+
+The model gets to rephrase the question. It never gets to answer it.
+
+**Every interpreted line prints `read as:` in the same breath.** That is the
+same rule the time parser follows, for the same reason: a forgiving reader is
+safe only because it says out loud what it read, rather than leaving a
+misreading to be found weeks later in the history page.
+
+### What it is told
+
+Not just the names. `gtg` knows the shape of every movement from the log, and
+that is what makes the difference between a lookup and a guess:
+
+```
+ring dips               - counted, usually x5 (16 sets)
+kettlebell back stretch - timed, usually 30s (10 sets)
+farmer walk             - timed, usually 1 min, at 100 lb (5 sets)
+7am Ring Dips           - counted, usually x5 (1 set)
+```
+
+Given only the names, sonnet read `32nd backstretch` as **32 reps**. Given
+that line, it reads 30 seconds. "Usually" is the value seen **most often**,
+never the last one: the last one is precisely where a single mistyped entry
+lives, and one bad row must not redefine a movement. The set count is there
+so a one-off can be seen for what it is. Two of the entries above are parses
+that went wrong, and nobody has ever done either of them twice.
+
+### It has to look like an answer
+
+`claude -p` with no usable credential prints `Not logged in - Please run
+/login` **on stdout, and exits 0**. A sanitiser that only checked for letters
+passed that straight through, and a spoken set offered to add a movement
+called "Not logged in - Please run /login" to the pool.
+
+A logged-out session is a thing that will happen. So an answer is believed
+only when every piece of it carries a count, or a duration, or names a
+movement that already exists. Prose has none of the three. A refused answer is
+written into the nudge log by name rather than swallowed, because a reader
+that quietly stops reading is the same shape as a reminder that quietly stops
+reminding.
+
+### Settings
+
+```
+INTERPRET=claude    Claude Code, sonnet. The default. Measured 7.0s.
+INTERPRET=codex     the Codex CLI. Measured 8.0s, and it read the syntax
+                    template as literal text on the first try.
+INTERPRET=off       no reader; an unfamiliar line is refused, as before.
+MIC=Logitech BRIO   which microphone `gtg say` listens on; a prefix is enough.
+```
+
+Both readers run on a subscription, and neither takes an API key. The answer
+is cached by what was said, so a phrase repeated tomorrow costs nothing.
+Measured from a real LaunchAgent, not only from a terminal: the nudge fires
+from launchd, and a process outside the GUI login session cannot reach the
+Keychain where the credential lives.
+
 ## The menu bar
 
 A 🏋 item showing today's count and spread, `🏋 3 · 2/5h` meaning three sets
@@ -204,6 +341,7 @@ and two of the five waking hours so far got one, from `~/.hammerspoon/gtg.lua`:
 ```
 5 sets today  ·  home
 Did ring dips x5              <- the rotation's pick, one click
+Say a set…   ⌃⌥⌘V          <- speak it; nothing to type, nothing to find
 Log something else…
 Log what I did before sitting down…   <- one box, the whole morning in one line
 Not today — stop the nudges   <- off until tomorrow morning, one click
@@ -285,8 +423,10 @@ with the weight spelled out. Adding a movement that is already there is
 refused rather than duplicated; to change an entry, log it once with the new
 weight or run `gtg edit`.
 
-Typing something it does not know gets you a box with your line in it. Fix
-the spelling and it resolves. **Log it** records it under the name as typed,
+Typing something it does not know is now read once more before it is refused,
+by a model, as a sentence -- see **When it does not know the words** above.
+What that cannot resolve either gets you a box with your line in it, holding
+whatever the reading was. Fix the spelling and it resolves. **Log it** records it under the name as typed,
 and from then on the log is what makes it known. **Add to pool** does that and
 offers it every day. Nothing is recorded until you press one of them. On the
 command line the same two answers are `gtg --new "..."` and
@@ -428,6 +568,8 @@ wed:   farmer walk 1 min
 
 Keep the pool short. Grease-the-groove works by hitting the same few movements
 often and well short of failure.
+
+`INTERPRET=` and `MIC=` live here too, and are covered above.
 
 One dialog at a time. A lock file stops a second nudge from stacking a second
 window on top of an unanswered one, and the 15 minute ceiling stops an ignored

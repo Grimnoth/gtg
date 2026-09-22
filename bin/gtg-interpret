@@ -1,0 +1,216 @@
+#!/bin/bash
+# gtg-interpret -- read one sentence on stdin, print one line of gtg syntax.
+#
+# THE MODEL NEVER WRITES TO THE LOG. It rewrites the input into the grammar gtg
+# already has, and that line goes back through record_batch, which checks it
+# exactly as it checks anything typed. A model that invents a movement gets the
+# same "New movement" box a typo gets. A model that is slow, off or broken
+# prints nothing and the caller falls back to today's behaviour. That is the
+# whole safety argument, and it is why this is a filter rather than a feature.
+#
+# It exists because a closed set and a strict grammar only work while the input
+# is a COMMAND. Ben speaks his input. "30-second back stretch with kettlebell"
+# was refused on 2026-09-22 and hand-corrected into a row saying 30 REPS of a
+# movement that has been 30 SECONDS every other time it was done. The words he
+# left off were at the front and the back at once, which neither prefix nor
+# substring matching can reach. That is not a bug in the matcher. It is a
+# sentence meeting a parser.
+#
+# Prints nothing and exits 0 on every failure. FAILS OPEN, ALWAYS.
+set -u
+
+. "$(dirname "$0")/gtg-lib.sh"
+
+CACHE="$STATE_DIR/interpreted.tsv"
+CACHE_KEEP=500
+MODEL_TIMEOUT="${GTG_INTERPRET_TIMEOUT:-25}"
+
+text=$(cat)
+text=$(printf '%s' "$text" | tr -d '\r' | head -1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+[ -n "$text" ] || exit 0
+
+# The cache key ignores case, punctuation and spacing, so "10 ring dips" and
+# "10 Ring Dips." are one question. Speech repeats itself far more than typing
+# does, and the second answer should be free.
+key=$(printf '%s' "$text" | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' ' ' | sed 's/^ *//; s/ *$//')
+[ -n "$key" ] || exit 0
+
+if [ -s "$CACHE" ]; then
+  hit=$(awk -F'\t' -v k="$key" '$1 == k { r = $2 } END { if (r != "") print r }' "$CACHE")
+  if [ -n "${hit:-}" ]; then printf '%s\n' "$hit"; exit 0; fi
+fi
+
+# --- which reader ------------------------------------------------------------
+# INTERPRET= in plan.txt: "claude" (the default), "claude opus", "codex", or
+# "off". Both run on Ben's own subscription and neither takes an API key.
+#
+# Claude is the default because both were measured on the failing line:
+# sonnet answered in 7.0s with "kettlebell back stretch 30s", and codex took
+# 8.0s and answered "kettlebell back stretch DUR32s", reading the syntax
+# template as literal text.
+#
+# GTG_INTERPRET_CMD replaces the whole command. That is how the test suite
+# exercises every path here with no model, no network and no subscription.
+engine=$(cfg INTERPRET); engine=${engine:-claude}
+read -r engine model <<EOF
+$engine
+EOF
+
+if [ -n "${GTG_INTERPRET_CMD:-}" ]; then
+  set -- ${GTG_INTERPRET_CMD}
+else
+  case "$engine" in
+    off|no|none|"") exit 0 ;;
+    codex) command -v codex >/dev/null 2>&1 || exit 0
+           set -- codex exec --skip-git-repo-check -s read-only - ;;
+    claude) command -v claude >/dev/null 2>&1 || exit 0
+            set -- claude -p --model "${model:-sonnet}" ;;
+    *) exit 0 ;;
+  esac
+fi
+
+# --- the prompt --------------------------------------------------------------
+# A QUOTED heredoc for the fixed text and printf for everything else. Nothing
+# variable is ever interpolated by the shell: an unquoted heredoc evaluates
+# $(...) inside it, and both variable halves here are free text -- the spoken
+# report, and movement names read back out of the log. A movement named
+# "$(rm -rf ~)" is a silly thing to log and must not be a dangerous one.
+profiles=$(movement_profiles)
+prompt=$(mktemp); out=$(mktemp)
+trap 'rm -f "$prompt" "$out"' EXIT
+{
+  cat <<'HEAD'
+You turn one report of exercise, spoken or typed, into one line of a strict
+logging syntax. Reply with that line and nothing else: no explanation, no
+quotes, no code fence.
+
+MOVEMENTS THIS LOG ALREADY KNOWS, and how each is usually recorded:
+HEAD
+  printf '%s\n' "$profiles"
+  cat <<'BODY'
+
+SYNTAX
+  <name> x<reps>       a counted set       ring dips x5
+  <name> <n>s          a timed set         dead hang 30s
+  <name> <n> min       a timed set         farmer walk 1 min
+  <name> ... @ <n> lb  a weight was named  kettlebell swings x10 @ 50 lb
+  @<time> <name> ...   done earlier        @8am pull-ups x5
+  Join several sets with " ; ".
+
+RULES
+  Use a known name EXACTLY when the report means that movement. Word order
+  does not matter and neither do missing words: "back stretch with the
+  kettlebell" is "kettlebell back stretch".
+  Keep each movement in the shape it is usually recorded in. A timed movement
+  takes a duration and never a rep count.
+  Speech mangles a number in front of a unit: "thirty second" arrives as
+  "32nd" or "30th", "forty five second" as "45th". On a timed movement read
+  those as the seconds they were spoken as.
+  A movement logged once or twice may be a mistake rather than a real
+  movement. Prefer a name with many sets behind it.
+  Write a time EXACTLY as it was said, and only when one was said. "7am" is
+  @7am. Never round it, never add minutes that were not spoken, and never
+  copy a time out of the examples above.
+  Never invent a weight. A remembered weight is added later and must not be
+  repeated here. Write a weight only when the report names one.
+  A movement that is genuinely not in the list gets a short clean name in the
+  same syntax.
+  If the report is not about exercise at all, reply with exactly: NONE
+BODY
+  printf '\nThe time now is %s.\n\nREPORT\n' "$(date '+%H:%M on %a %-d %b %Y')"
+  printf '%s\n' "$text"
+}  >"$prompt"
+
+# --- run it ------------------------------------------------------------------
+# A ceiling of its own, because macOS ships no timeout(1) and a dialog is
+# waiting on the other end of this. A model that hangs must cost 25 seconds
+# once, not a nudge that never returns.
+"$@" <"$prompt" >"$out" 2>/dev/null &
+pid=$!
+# The watcher POLLS and retires itself, rather than being killed once the
+# model answers. Killing it worked and printed "Killed: 9" from job control on
+# every single run, onto the stderr of a tool whose whole job is to stay quiet
+# and fail open.
+(
+  i=0
+  while [ "$i" -lt "$MODEL_TIMEOUT" ]; do
+    kill -0 "$pid" 2>/dev/null || exit 0
+    sleep 1
+    i=$(( i + 1 ))
+  done
+  kill -9 "$pid" 2>/dev/null
+) >/dev/null 2>&1 &
+wait "$pid" 2>/dev/null || true
+
+# The LAST non-empty line. Claude answers with the line alone; codex prints a
+# token tally and hook chatter around it. Taking the last line is what makes
+# one sanitiser cover both.
+line=$(grep -v '^[[:space:]]*$' "$out" 2>/dev/null | tail -1)
+
+# Printable ASCII only, fences and wrapping quotes off, and a ceiling on the
+# length. This is a filter standing between a model and a log, so what it
+# passes on is a narrow shape rather than whatever came back.
+line=$(printf '%s' "$line" \
+  | tr -d '\000-\037' \
+  | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^```[a-z]*//; s/```$//' \
+  | sed 's/^"//; s/"$//; s/^`//; s/`$//' \
+  | cut -c1-200)
+
+case "$line" in
+  ""|NONE|none|None) exit 0 ;;
+esac
+# An answer with no letter in it is not a movement. "x5" alone, or a bare
+# number, would reach record_batch as a nameless set.
+printf '%s' "$line" | grep -q '[A-Za-z]' || exit 0
+
+# --- is that an answer, or is it prose? --------------------------------------
+# A model that fails does not always say so on stderr or in its exit code.
+# `claude -p` with no usable credential printed "Not logged in - Please run
+# /login" on STDOUT and exited 0, and a sanitiser that only checked for letters
+# passed it straight through -- so a spoken set offered to add a movement
+# called "Not logged in - Please run /login" to the pool. A logged-out session
+# is a thing that will happen, and the launchd nudge cannot reach the Keychain
+# at all if it ever runs outside the GUI session.
+#
+# So the answer has to LOOK like sets before it is believed. Every piece must
+# carry a count, or a duration, or name a movement that already exists. Prose
+# has none of the three. A short clean name for a genuinely new movement is
+# refused when it carries no number either, and that is the right trade: the
+# fallback is the New movement box, which is exactly where an answer nobody
+# can check belongs.
+refuse() {
+  note "interpret: refused \"$1\" for \"$text\"" >>"$NUDGE_LOG" 2>/dev/null || true
+  exit 0
+}
+
+pieces=0
+while IFS= read -r piece; do
+  piece=$(printf '%s' "$piece" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  [ -n "$piece" ] || continue
+  pieces=$(( pieces + 1 ))
+  [ "$pieces" -le 8 ] || refuse "$line"
+  case "$piece" in
+    @*) split_at "$piece"; piece="$AT_REST" ;;
+  esac
+  read_piece "$piece"
+  [ -n "$P_NAME" ] || refuse "$line"
+  # A movement is a name, not a sentence. Nothing in any pool is near this
+  # long, and prose always is.
+  [ "${#P_NAME}" -le 40 ] || refuse "$line"
+  if [ -z "$P_REPS" ] && [ -z "$P_DUR" ] && [ -z "$(resolve_movement "$P_NAME")" ]; then
+    refuse "$line"
+  fi
+done < <(printf '%s\n' "$line" | tr ';|' '\n\n' \
+         | awk '{ gsub(/[ \t]+([Aa][Nn][Dd]|&)[ \t]+/, "\n"); print }')
+[ "$pieces" -gt 0 ] || exit 0
+
+# Cached only once it looks like an answer, so a bad run is not remembered.
+# Trimmed in place, newest last, because this is a convenience and not a
+# record: losing it costs one more model call.
+printf '%s\t%s\t%s\n' "$key" "$line" "$text" >>"$CACHE" 2>/dev/null || true
+if [ "$(wc -l <"$CACHE" 2>/dev/null || echo 0)" -gt "$(( CACHE_KEEP * 2 ))" ]; then
+  tail -n "$CACHE_KEEP" "$CACHE" >"$CACHE.tmp" 2>/dev/null \
+    && mv "$CACHE.tmp" "$CACHE" 2>/dev/null || rm -f "$CACHE.tmp"
+fi
+
+printf '%s\n' "$line"

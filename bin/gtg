@@ -22,6 +22,8 @@ gtg @-90m push-ups x20          90 minutes ago
 gtg @"yesterday 6pm" ring dips x5
 gtg when 8am   show how a time would be read, without logging
 
+gtg say        press, speak, done. Says a set out loud and logs it
+gtg mic        which microphone `gtg say` listens on (gtg mic 3 to pick)
 gtg options    list today's choices
 gtg off        no more nudges today (gtg off sick / gtg off 2h / gtg off 3d)
 gtg on         start them again
@@ -148,6 +150,59 @@ today_report() {
 
 case "${1:-done}" in
   help|-h|--help) usage ;;
+
+  say)
+    # Press a key, say what you did, and it is logged. The whole point is that
+    # this costs nothing: no window to find, no field to focus, no typing. A
+    # set remembered at the top of the stairs is a set logged.
+    #
+    # It EXECS the ordinary free-text path rather than reimplementing it, so a
+    # spoken "@7:15 pull-ups" backdates, a spoken "not today" stops the
+    # nudges, and a spoken round splits on "and" -- all of it, for free, and
+    # none of it able to drift from what typing the same words does.
+    listener="$LIB_DIR/gtg-listen"
+    if [ ! -x "$listener" ]; then
+      echo "gtg-listen is not built: run ./install.sh (it needs Xcode's swiftc)." >&2
+      exit 1
+    fi
+    mic=$(cfg MIC)
+    if [ -n "$mic" ]; then heard=$("$listener" --device "$mic"); else heard=$("$listener"); fi
+    [ -n "${heard:-}" ] || exit 1
+    printf 'heard: %s\n' "$heard" >&2
+    exec "$0" "$heard"
+    ;;
+
+  mic)
+    # Which microphone `gtg say` listens on. This exists because the obvious
+    # default is wrong here and silently so: the system default input on this
+    # Mac is an audio interface with nothing plugged in, which records a flat
+    # -71 dB, and its loopback channels carry whatever is PLAYING on the Mac.
+    # Left to the default, the first thing this ever transcribed was a podcast.
+    listener="$LIB_DIR/gtg-listen"
+    if [ ! -x "$listener" ]; then
+      echo "gtg-listen is not built: run ./install.sh (it needs Xcode's swiftc)." >&2
+      exit 1
+    fi
+    cur=$(cfg MIC)
+    if [ -n "${2:-}" ]; then
+      # A number picks off the list; anything else is a name, matched the way
+      # the listener matches it.
+      if printf '%s' "$2" | grep -qE '^[0-9]+$'; then
+        pick=$("$listener" --list | sed -n "${2}p")
+        [ -n "$pick" ] || { echo "no input device $2; run: gtg mic" >&2; exit 1; }
+      else
+        pick="$2"
+      fi
+      cfg_set MIC "$pick" || exit 1
+      echo "gtg say will listen on: $pick"
+    else
+      "$listener" --list | awk -v cur="$cur" '
+        { printf "  %d  %s%s\n", NR, $0, (cur != "" && index($0, cur) == 1 ? "   <- in use" : "") }'
+      echo
+      if [ -n "$cur" ]; then echo "MIC=$cur in plan.txt. Change it: gtg mic 3"
+      else echo "No MIC= set, so the system default is used. Pick one: gtg mic 3"; fi
+    fi
+    ;;
 
   plan) cat "$PLAN" ;;
 
@@ -544,7 +599,7 @@ case "${1:-done}" in
       # Anything else is whatever you actually did: gtg "chin-ups x8", or a
       # whole round with "and" or ";" between sets. An unknown movement is a
       # question, not a guess: nothing is recorded until you say --new.
-      out=$(record_batch "$1" "$where"); rc=$?
+      out=$(record_smart "$1" "$where"); rc=$?
       case "$rc" in
         0) printf '%s\n' "$out" | sed 's/^/logged: /'
            echo "        [$where]$(at_note)" ;;

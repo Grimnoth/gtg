@@ -13,6 +13,20 @@ LOG="$STATE_DIR/log.tsv"
 NUDGE_LOG="$STATE_DIR/nudge.log"
 PAUSE="$STATE_DIR/paused"
 
+# Where the other scripts are, taken from THIS file rather than from $0.
+#
+# $0 is whoever sourced us, and that is not always something in bin/: the test
+# suite sources this file directly, so `dirname "$0"` is test/ and a sibling
+# script is looked for where none exists.
+#
+# ponytail: record() and refresh_page() still reach for gtg-page through $0,
+# so under the suite that call silently finds nothing and is swallowed by the
+# `|| true`. Harmless today and wrong in the same way. Moving them here makes
+# every recorded row in the suite rebuild the history page, which is a real
+# cost on a suite that writes a few hundred, so it wants a GTG_NO_PAGE around
+# the suite rather than a one-line change.
+LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+
 # 40 min, against fires 30 min apart -- so answering one nudge suppresses the
 # next slot and the felt cadence is about an hour, which is the point of the
 # whole tool. It also absorbs the burst launchd emits when it replays every
@@ -764,6 +778,101 @@ resolve_movement() {
   }
 }
 
+# What this tool knows about each movement, one line each, for the interpreter
+# to read before it rewrites a sentence.
+#
+# This is the whole difference between a model guessing and a model looking
+# something up. Given only the NAMES, sonnet read "32nd backstretch" as 32
+# REPS. Given that kettlebell back stretch is a timed movement that has been 30
+# seconds every time it was ever done, it reads 30s.
+#
+# Every word of it comes out of Ben's own log and plan -- the same two sources
+# known_movements reads. Nothing is invented and there is no second registry to
+# drift out of step with the plan he actually reads.
+#
+# One awk pass over three tagged streams rather than a fork per movement. The
+# decorate_weights ponytail measured five movements at ~470ms done that way,
+# and this runs immediately before a model call that already costs seven
+# seconds.
+movement_profiles() {
+  local known plan
+  known=$(known_movements)
+  [ -n "$known" ] || return 0
+  plan=$(for k in every away mon tue wed thu fri sat sun; do plan_line "$k"; done \
+         | tr '|' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' \
+         | awk "$AWK_KEY"'{ print key($0) "\t" $0 }')
+  {
+    printf '%s\n' "$known" | sed 's/^/K\t/'
+    [ -n "$plan" ] && printf '%s\n' "$plan" | sed 's/^/P\t/'
+    [ -s "$LOG" ] && sed 's/^/L\t/' "$LOG"
+  } | awk -F'\t' "$AWK_KEY"'
+      function dur(d) { return (d >= 60 && d % 60 == 0) ? int(d / 60) " min" : d "s" }
+      function wgt(w) { sub(/[0-9.]+/, "& ", w); return w }
+
+      $1 == "K" { name[$2] = $3; next }
+      $1 == "P" { if (!($2 in entry)) entry[$2] = $3; next }
+      $1 == "L" && $4 != "skip" && $3 != "" {
+        k = key($3)
+        if (!(k in name)) next
+        # Latest by timestamp, file order breaking a tie. The same rule as
+        # last_weight_for, and for the same reason: a whole round lands inside
+        # one second, so ">" alone lets its first set outrank its last.
+        sets[k]++
+        # "Usually" means the value seen MOST OFTEN, not the one seen last.
+        # Last is what a single mistyped entry leaves behind: one "back stretch
+        # 30" typed by hand this morning would otherwise teach the model that
+        # the movement is 30 reps. The mode survives a bad row; the last value
+        # is the bad row.
+        if ($4 ~ /^[0-9]+$/) { nrep[k]++; rc[k SUBSEP $4]++; if (rc[k SUBSEP $4] > rb[k]) { rb[k] = rc[k SUBSEP $4]; rep[k] = $4 } }
+        if ($7 != "")        { ndur[k]++; dc[k SUBSEP $7]++; if (dc[k SUBSEP $7] > db[k]) { db[k] = dc[k SUBSEP $7]; dur_[k] = $7 } }
+        # The weight is the exception and stays LATEST, because that is what
+        # the whole feature means: change the bell once and it is the new one.
+        if ($6 != "" && $2 >= ws[k]) { ws[k] = $2; wt[k] = $6 }
+      }
+      END {
+        for (k in name) {
+          # Timed or counted is decided by the whole log, not by the newest
+          # row, for the same reason the mode beats the last value.
+          shape = ""
+          if (ndur[k] > nrep[k]) shape = "timed, usually " dur(dur_[k])
+          else if (nrep[k] > 0)  shape = "counted, usually x" rep[k]
+          else if (k in entry)   shape = "in the plan as: " entry[k]
+          else                   shape = "never logged"
+          if (k in wt) shape = shape ", at " wgt(wt[k])
+          # The set count is here so a one-off can be recognised as one. A
+          # movement logged once is either brand new or a mistake -- the log
+          # holds "7am Ring Dips" and "Ring Dips Weight +", both of them a
+          # parse that went wrong -- and a reader deciding what a sentence
+          # means should be able to see that nobody has ever done it twice.
+          n = (k in sets) ? sets[k] : 0
+          printf "%s - %s (%d %s)\n", name[k], shape, n, (n == 1 ? "set" : "sets")
+        }
+      }' | sort
+}
+
+# Write a KEY=value line into plan.txt, replacing the existing one or adding
+# it at the end. Same care as plan_add: a producer that fails halfway still
+# leaves a nonempty file, so success is checked before anything is renamed
+# over the plan you actually read.
+cfg_set() {   # KEY VALUE
+  local k="$1" v="$2" tmp
+  case "$k" in
+    [A-Z_]*) ;;
+    *) echo "bad setting name: $k" >&2; return 1 ;;
+  esac
+  [ -w "$PLAN" ] || { echo "cannot write $PLAN" >&2; return 1; }
+  tmp="$PLAN.tmp.$$"
+  if grep -q "^$k=" "$PLAN"; then
+    awk -v k="$k" -v v="$v" '
+      index($0, k "=") == 1 && !done { print k "=" v; done = 1; next } { print }' "$PLAN" >"$tmp"
+  else
+    cp "$PLAN" "$tmp" && printf '%s=%s\n' "$k" "$v" >>"$tmp"
+  fi
+  # shellcheck disable=SC2181
+  if [ $? -ne 0 ] || [ ! -s "$tmp" ]; then rm -f "$tmp"; return 1; fi
+  mv "$tmp" "$PLAN"
+}
+
 # Add a movement to a pool in plan.txt, so the set of known movements is
 # something you extend rather than something the parser invents.
 # plan_add "kettlebell swings x10 @ 50 lb" [every|away|mon|...]
@@ -969,6 +1078,51 @@ EOF
   refresh_page
 }
 
+
+# record_batch, and if the line is not a set of MOVEMENTS, one attempt at
+# reading it as a SENTENCE. The single hook for the whole interpreter, so the
+# CLI, the nudge and the menu bar all get it from one place.
+#
+# The order is the safety. Everything already understood is logged by the
+# parser exactly as before and never reaches a model at all: the interpreter
+# runs only on the miss, which today means a sentence, a dictation, or a typo.
+# And its answer is not trusted either -- it goes back through record_batch,
+# which resolves every name against the movements you actually have and still
+# refuses what it does not know. The model gets to rephrase the question. It
+# never gets to answer it.
+#
+# "read as:" goes to STDERR on every interpreted line, and that is not a
+# detail. It is the same rule the time parser follows: a forgiving reader is
+# safe only because it says out loud what it read, in the same breath, rather
+# than leaving a misreading to be found weeks later in the history page.
+# Stderr rather than a variable because every caller runs this inside a command
+# substitution, and a variable set in a subshell reaches nobody.
+record_smart() {   # TEXT WHERE
+  local text="$1" where="$2" err out rc reading
+  err=$(mktemp)
+  out=$(record_batch "$text" "$where" 2>"$err"); rc=$?
+  if [ "$rc" -ne 3 ]; then
+    cat "$err" >&2; rm -f "$err"
+    [ -n "$out" ] && printf '%s\n' "$out"
+    return "$rc"
+  fi
+
+  reading=$(printf '%s\n' "$text" | "$LIB_DIR/gtg-interpret" 2>/dev/null)
+  # Nothing to add: no reader configured, a model that failed, or an answer
+  # identical to the question. The original refusal stands, word for word.
+  if [ -z "$reading" ] || [ "$reading" = "$text" ]; then
+    cat "$err" >&2; rm -f "$err"
+    return 3
+  fi
+  rm -f "$err"
+
+  err=$(mktemp)
+  out=$(record_batch "$reading" "$where" 2>"$err"); rc=$?
+  printf 'read as: %s\n' "$reading" >&2
+  cat "$err" >&2; rm -f "$err"
+  [ -n "$out" ] && printf '%s\n' "$out"
+  return "$rc"
+}
 
 # Escape for embedding in an AppleScript double-quoted string.
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
