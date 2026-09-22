@@ -11,6 +11,7 @@ HOME_MAC_FILE="$CONF_DIR/home-gateway-mac"
 STAMP="$STATE_DIR/last-nudge"
 LOG="$STATE_DIR/log.tsv"
 NUDGE_LOG="$STATE_DIR/nudge.log"
+PAUSE="$STATE_DIR/paused"
 
 # 40 min, against fires 30 min apart -- so answering one nudge suppresses the
 # next slot and the felt cadence is about an hour, which is the point of the
@@ -158,6 +159,90 @@ in_waking_window() {
   [ "$1" -ge "$WAKE_S" ] && [ "$1" -lt "$WAKE_E" ]
 }
 
+# --- not today --------------------------------------------------------------
+# Some days there is no set coming: sick, wrecked, travelling. Nine dialogs on
+# such a day are pure nuisance, and a nuisance with no off switch is how a
+# reminder gets muted for good -- the tool survives by being answerable, so it
+# has to take "not today" for an answer.
+#
+# Every pause carries an end time and expires by itself, because the failure to
+# avoid is the opposite one: a tool switched off in February and noticed in
+# May. Nothing is scheduled and no timer has to survive a reboot. The expiry is
+# read, and an expired file is deleted as it is read.
+
+# True while the nudge is off. Sets PAUSE_UNTIL (epoch) and PAUSE_WHY.
+pause_active() {
+  PAUSE_UNTIL=""; PAUSE_WHY=""
+  [ -s "$PAUSE" ] || return 1
+  IFS="$(printf '\t')" read -r PAUSE_UNTIL PAUSE_WHY <"$PAUSE" || true
+  # A file that is not an epoch is a file nobody can trust to expire, so it
+  # goes rather than muting the tool for ever.
+  case "$PAUSE_UNTIL" in ''|*[!0-9]*) rm -f "$PAUSE"; PAUSE_UNTIL=""; return 1 ;; esac
+  [ "$(date +%s)" -lt "$PAUSE_UNTIL" ] && return 0
+  rm -f "$PAUSE"; PAUSE_UNTIL=""; PAUSE_WHY=""
+  return 1
+}
+
+# When a pause must end, as an epoch. "1d" is the default and means the rest of
+# today: the nudges come back at TOMORROW's WAKE_START, since "I am not doing
+# these today" is the thing actually being said.
+#
+#   2h / 90m   a stretch from now
+#   3d         today and two more days, back on the fourth morning
+pause_ends() {
+  local d="${1:-1d}"
+  printf '%s' "$d" | grep -qE '^[0-9]+[dhm]$' || return 1
+  waking_bounds
+  case "$d" in
+    *d) date -v+"${d%d}"d -v"${WAKE_S}"H -v0M -v0S '+%s' ;;
+    *h) printf '%s' $(( $(date +%s) + ${d%h} * 3600 )) ;;
+    *m) printf '%s' $(( $(date +%s) + ${d%m} * 60 )) ;;
+  esac
+}
+
+# Written by every path that turns the nudges off. The caller writes the nudge
+# log line itself: gtg-nudge prints its log to stdout for launchd to append,
+# and `gtg` appends directly, so doing it here would double-record one of them.
+pause_set() {   # ENDS_EPOCH [REASON]
+  printf '%s\t%s\n' "$1" "${2:-}" >"$PAUSE"
+}
+
+pause_human() { date -r "$1" '+%a %-d %b %H:%M'; }
+
+# "Nah, stop sending me these" -- typed where a movement would go. The nudge's
+# Other... box and the menu bar's one text field are where the nuisance is
+# actually felt, so the answer is taken there rather than only in a terminal.
+#
+# Sets PAUSE_FOR (a duration, or empty for the rest of today) and PAUSE_REASON.
+# Returns 1 for every ordinary set, which is nearly every line: the words are
+# anchored at the start, must end a word, and none of them names a movement.
+parse_pause() {
+  PAUSE_FOR=""; PAUSE_REASON=""
+  local l first
+  l=$(printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/^[[:space:]]*//; s/[[:space:]!.,]*$//')
+  printf '%s' "$l" \
+    | grep -qE '^(off|pause|stop|not today|no more today|done for today|sick)([[:space:],]|$)' \
+    || return 1
+  # The keyword goes, the reason stays. "sick" is deliberately not stripped:
+  # it is the reason as well as the request.
+  l=$(printf '%s' "$l" \
+      | sed -E 's/^(off|pause|stop|not today|no more today|done for today)[,[:space:]]*//' \
+      | sed -E 's/^(for|until|till)[[:space:]]+//; s/^(today|the rest of the day)[,[:space:]]*//' \
+      | sed 's/^[[:space:]]*//')
+  # A word that STARTS with a digit is a stretch of time or a mistyped one,
+  # never a reason. Letting "2x" fall through to the reason would have paused
+  # for the rest of the day while the person meant two hours, and said nothing
+  # about it. pause_ends rejects it and the caller decides what to say.
+  first=${l%%[[:space:]]*}
+  case "$first" in
+    [0-9]*)
+      PAUSE_FOR="$first"
+      l=$(printf '%s' "${l#"$first"}" | sed 's/^[[:space:]]*//') ;;
+  esac
+  PAUSE_REASON="$l"
+  return 0
+}
+
 # One plan line by key, options still "|" separated.
 plan_line() { sed -n "s/^$1:[[:space:]]*//p" "$PLAN" 2>/dev/null | head -1; }
 
@@ -196,6 +281,13 @@ today_options() {
 # entry without one ("bulgarian split squats") was offered bare, "Did it"
 # logged a set with no reps, and the question was "how does it know how
 # many?". It does not; it remembers. A timed movement never gets a count.
+#
+# ponytail: this is the slow part of the whole tool, and the ceiling is the
+# shape, not the size of the log. Each option forks read_piece, last_reps_for
+# and last_weight_for, and a movement with no logged weight also forks
+# plan_weight_for, which re-reads the plan nine times. Five options measured
+# ~470ms on 124 rows. The upgrade is one awk pass over the log that emits the
+# last weight and count for every movement at once, read into the loop.
 decorate_weights() {
   local opt wt reps
   while IFS= read -r opt; do

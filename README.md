@@ -25,6 +25,9 @@ gtg "a; b; c"  log a whole round, ";" between movements
 gtg @8am ...   log a set you did earlier (see below)
 gtg when 8am   show how a time would be read, logging nothing
 gtg options    list today's choices
+gtg off        no more nudges today (gtg off sick, gtg off 2h, gtg off 3d)
+gtg on         start them again
+gtg status     where, the pick, today's sets, and whether it is off
 gtg skip       record a miss
 gtg nudges     the last 20 fires and what each one did
 gtg fires      what became of every nudge in the last 14 days
@@ -57,6 +60,46 @@ A modal picker listing the day's options, first one preselected, plus
   before a single row is written.
 - **Snooze**, or letting it time out after 15 minutes, deliberately leaves the
   slot unconsumed, so the next fire retries rather than skipping the hour.
+
+## Not today
+
+Some days there is no set coming: sick, wrecked, travelling. Nine dialogs on
+such a day are pure nuisance, and a reminder with no off switch is one you
+learn to ignore, which costs every day after it too. So it takes "no" for an
+answer.
+
+```sh
+gtg off             no more today; back tomorrow morning
+gtg off sick        the same, with a reason kept in the log
+gtg off 2h          just this stretch
+gtg off 3d flu      today and two more days
+gtg on              back on now
+```
+
+The menu bar says **Not today — stop the nudges**, one click, and reads
+**Turn the nudges back on** while it is off. The title reads `🏋 off`, so a
+quiet afternoon is never a mystery.
+
+The same words work wherever there is a text field, which is the point: the
+moment this is wanted is the moment a dialog is in the way. Type `off`,
+`not today`, `no more today`, `stop`, or `sick` into the nudge's **Other…**
+box or the menu bar's box and the nudges stop. A duration and a reason may
+follow any of them.
+
+**Every pause carries an end time**, and no argument means the rest of today:
+the nudges come back by themselves at tomorrow's `WAKE_START`. The failure to
+avoid is the opposite one, a tool switched off in February and noticed in May.
+Nothing is scheduled to bring them back either. The expiry is read at the next
+fire, and an expired pause file is deleted as it is read, so no timer has to
+survive a reboot.
+
+A word starting with a digit is read as a stretch of time, never as a reason.
+`gtg off 2x` is refused rather than quietly meaning the rest of the day.
+
+A day off is not a day of nudges ignored, so `gtg fires` counts them apart:
+they land in the `skipped:` line as `turned off`, and never in the `no answer`
+share. The pause also silences the menu bar's "Before you sat down?" box on
+the next unlock. "Stop sending me these things" means that one too.
 
 ## Sets you did before you sat down
 
@@ -163,11 +206,30 @@ and two of the five waking hours so far got one, from `~/.hammerspoon/gtg.lua`:
 Did ring dips x5              <- the rotation's pick, one click
 Log something else…
 Log what I did before sitting down…   <- one box, the whole morning in one line
+Not today — stop the nudges   <- off until tomorrow morning, one click
 Something got in the way…     <- a friction note, stamped with the context
 Today  >                      <- every set, with times
 History page…
 Refresh
 ```
+
+### The click does no work
+
+The menu used to run three `gtg` commands while the click waited: `today`,
+`where` and `options`, measured at 153ms, 145ms and 634ms on this Mac.
+`hs.menubar` builds its menu synchronously, so that was most of a second spent
+on Hammerspoon's main thread with the pointer already down, every single time.
+It felt like a menu that sometimes does not open.
+
+Now the menu is drawn from the last snapshot and nothing else, which measures
+under a millisecond. Opening it also starts a fresh snapshot in the
+background, through `hs.task` rather than `hs.execute`, and the next open and
+the five minute timer pick that up. One `gtg status` call replaced the three,
+because the menu needs one process, not three.
+
+The cost of the trade is a count that can be a few minutes stale. The actions
+never read it -- `gtg` recomputes the pick when it runs -- so the worst case is
+a stale label, never a wrong set logged.
 
 Hammerspoon rather than a menu bar app of its own: it was already installed and
 running here, and this is a face for the `gtg` CLI, not a second implementation

@@ -196,7 +196,8 @@ is "gtg <text>: no not-found" "$(printf '%s' "$out" | grep -c 'not found')" "0"
 missing=0
 for fn in record record_option record_batch new_for resolve_movement \
           known_movements plan_add last_weight_for read_piece parse_piece \
-          fmt_piece fmt_dur fmt_wt decorate_weights today_options; do
+          fmt_piece fmt_dur fmt_wt decorate_weights today_options \
+          pause_active pause_ends pause_set pause_human parse_pause; do
   declare -f "$fn" >/dev/null 2>&1 || { missing=$((missing+1)); echo "         missing: $fn"; }
 done
 is "no called function is undefined" "$missing" "0"
@@ -374,6 +375,95 @@ in_waking_window 20 && ok  "20:00 still nudges"         || bad "20:00 still nudg
 in_waking_window 21 && bad "21:00 is already out"       "allowed" "skipped" || ok "21:00 is already out"
 in_waking_window 23 && bad "23:00 is out"               "allowed" "skipped" || ok "23:00 is out"
 
+echo "== not today: the nudges can be turned off =="
+# A day with no set coming is a day of nine useless dialogs, and a reminder
+# with no off switch is one you learn to ignore, which costs every later day
+# too. Every pause carries an end time, so the failure is never the opposite
+# one: switched off in February, noticed in May.
+reset_plan
+rm -f "$GTG_STATE_DIR/paused"
+pause_active && bad "off by default" "paused" "on" || ok "off by default"
+
+# The words, wherever they are typed. The menu bar and the nudge have one text
+# field and no subcommands, so "not today" arrives as a whole line.
+pp() { if parse_pause "$1"; then printf '%s|%s' "$PAUSE_FOR" "$PAUSE_REASON"; else printf 'SET'; fi; }
+is "bare off"                 "$(pp 'off')"                  "|"
+is "with a reason"            "$(pp 'off sick')"             "|sick"
+is "sick on its own"          "$(pp 'sick')"                 "|sick"
+is "a comma after it"         "$(pp 'not today, wrecked')"   "|wrecked"
+is "for a stretch"            "$(pp 'pause 90m bad back')"   "90m|bad back"
+is "any case"                 "$(pp 'OFF 2h')"               "2h|"
+# Every ordinary set must fall through, including one that starts with the
+# same letters: the word has to END there.
+is "a movement is a set"      "$(pp 'pull-ups x5')"          "SET"
+is "  even starting with off" "$(pp 'offset rows x5')"       "SET"
+is "  even with a comma"      "$(pp 'stairs, 2 flights')"    "SET"
+# A word starting with a digit is a stretch of time or a mistyped one, never a
+# reason. "2x" read as a reason would pause the whole day in silence.
+is "a mistyped stretch stays a stretch" "$(pp 'off 2x')"     "2x|"
+
+# The expiry is READ, never scheduled: nothing has to survive a reboot for the
+# nudges to come back, and a stale pause cannot outlive its day.
+pause_set "$(( $(date +%s) + 60 ))" "sick"
+pause_active; is "a live pause is on" "$?" "0"
+is "  and says why"                   "$PAUSE_WHY" "sick"
+pause_set "$(( $(date +%s) - 60 ))" "sick"
+pause_active && bad "an expired pause is off" "paused" "on" || ok "an expired pause is off"
+is "  and the file is gone" "$([ -f "$GTG_STATE_DIR/paused" ] && echo yes || echo no)" "no"
+# A file nobody can trust to expire must not be able to mute the tool for ever.
+printf 'soon\n' >"$GTG_STATE_DIR/paused"
+pause_active && bad "an unreadable pause is off" "paused" "on" || ok "an unreadable pause is off"
+
+# End to end: a paused fire opens nothing, says why, and leaves the slot
+# unburned. A window of 0..24 keeps this true at any hour the suite runs.
+reset_plan
+sed -i '' "s/^WAKE_START=.*/WAKE_START=0/; s/^WAKE_END=.*/WAKE_END=24/" "$GTG_CONF_DIR/plan.txt"
+rm -f "$GTG_STATE_DIR/last-nudge" "$GTG_STATE_DIR/paused"
+./bin/gtg off sick >/dev/null
+is "a paused fire says so"  "$(./bin/gtg-nudge 2>&1 | grep -c 'skip: paused until')" "1"
+is "  and logs no set"      "$(wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' ')" "0"
+is "  and burns no slot"    "$([ -f "$GTG_STATE_DIR/last-nudge" ] && echo yes || echo no)" "no"
+is "  and today says it"    "$(./bin/gtg today | grep -c '^nudges are off until')" "1"
+is "  and status says it"   "$(./bin/gtg status | grep -c '^paused: ')" "1"
+./bin/gtg on >/dev/null
+is "gtg on turns them back on" "$(./bin/gtg status | grep -c '^paused: ')" "0"
+is "  and a second gtg on is honest" "$(./bin/gtg on)" "nudges are already on"
+
+# Typed into a text field rather than run as a subcommand: the menu bar path.
+is "a typed line pauses too" "$(./bin/gtg 'not today' | grep -c '^nudges off until')" "1"
+is "  and wrote no set"      "$(wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' ')" "0"
+./bin/gtg on >/dev/null
+./bin/gtg off 2x >/dev/null 2>&1; is "a mistyped stretch is refused (rc 1)" "$?" "1"
+is "  and paused nothing" "$([ -f "$GTG_STATE_DIR/paused" ] && echo yes || echo no)" "no"
+is "3d reaches a later day" \
+  "$(./bin/gtg off 3d >/dev/null; date -r "$(cut -f1 "$GTG_STATE_DIR/paused")" '+%Y-%m-%d')" \
+  "$(date -v+3d '+%Y-%m-%d')"
+rm -f "$GTG_STATE_DIR/paused"
+
+# A day turned off on purpose is not a day of dialogs ignored, and counting
+# the two together would read as a collapse in compliance.
+D=$(date '+%Y-%m-%d')
+cat >"$GTG_STATE_DIR/nudge.log" <<N
+$D 09:20  paused until Thu 17 Sep 09:00 (sick)
+$D 09:50  skip: paused until Thu 17 Sep 09:00 (sick)
+$D 10:20  skip: paused until Thu 17 Sep 09:00 (sick)
+N
+is "fires counts a day off apart" "$(./bin/gtg fires | grep -c '2 turned off')" "1"
+is "  and shows no nudges at all" "$(./bin/gtg fires | grep -c '^last 14 days: 0 nudges shown')" "1"
+
+echo "== status: one call for the menu bar =="
+# The menu used to make three calls on every click and waited about a second
+# for them. This is the one call that replaced them, so it has to carry
+# everything the menu draws.
+reset_plan
+record_batch 'pull-ups x5' home >/dev/null
+out=$(./bin/gtg status)
+is "names where you are" "$(printf '%s' "$out" | grep -c '^where: \(home\|away\)$')" "1"
+is "carries the pick"    "$(printf '%s' "$out" | grep -c '^pick: [a-zA-Z]')" "1"
+is "and today's sets"    "$(printf '%s' "$out" | grep -c '1 set(s)')" "1"
+is "and one row per set" "$(printf '%s' "$out" | grep -cE '^  [0-9][0-9]:[0-9][0-9]  ')" "1"
+is "quiet when it is on" "$(printf '%s' "$out" | grep -c '^paused: ')" "0"
+
 echo "== today shows the spread across the day =="
 # Grease-the-groove lives on spread, so `today` says how many waking hours
 # got a set. A window of 0..24 keeps the test true at any hour of the day.
@@ -489,7 +579,7 @@ echo "== readers run clean =="
 reset_plan
 record_batch 'pull-ups x5' home >/dev/null
 # `nudges` must survive an empty nudge log rather than erroring on it.
-for c in today week stats options plan nudges; do
+for c in today week stats options plan nudges status; do
   ./bin/gtg "$c" >/dev/null 2>&1 && ok "gtg $c" || bad "gtg $c" "nonzero" "0"
 done
 ./bin/gtg when 8am >/dev/null 2>&1 && ok "gtg when 8am" || bad "gtg when 8am" "nonzero" "0"
