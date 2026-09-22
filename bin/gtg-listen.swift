@@ -79,7 +79,15 @@ func inputDevices() -> [Device] {
   guard AudioObjectGetPropertyDataSize(system, &addr, 0, nil, &size) == noErr else { return [] }
   var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
   guard AudioObjectGetPropertyData(system, &addr, 0, nil, &size, &ids) == noErr else { return [] }
-  return ids.filter(hasInput).map { Device(id: $0, name: deviceName($0)) }
+  return ids.filter(hasInput)
+    .map { Device(id: $0, name: deviceName($0)) }
+    // macOS builds a transient aggregate whenever something opens the default
+    // device, and it comes and goes. Left in, it appears between a listing
+    // and a pick and shifts every row number after it, so `gtg mic 3` chooses
+    // a different microphone than the one that was on line 3 a moment ago.
+    // Nobody can select it on purpose; an aggregate you MADE has your name on
+    // it and is untouched.
+    .filter { !$0.name.hasPrefix("CADefaultDeviceAggregate") && !$0.name.isEmpty }
 }
 
 // --- plumbing ---------------------------------------------------------------
@@ -212,14 +220,26 @@ struct Main {
     let input = engine.inputNode
 
     if let wanted {
+      // Exact, then prefix, then substring, and each tier must match exactly
+      // ONE device -- the same three tiers resolve_movement uses, and the same
+      // rule about ties. Two identical webcams present two devices with one
+      // name, and picking the first of them would have recorded from the
+      // wrong one while reporting the name you asked for. An ambiguous name
+      // is a question, not a guess.
       let all = inputDevices()
-      // Prefix, case-insensitive, so MIC=macbook finds "MacBook Pro
-      // Microphone". The same forgiveness the movement matcher gives.
-      guard
-        let hit = all.first(where: { $0.name.lowercased().hasPrefix(wanted.lowercased()) })
-          ?? all.first(where: { $0.name.lowercased().contains(wanted.lowercased()) })
-      else {
+      let want = wanted.lowercased()
+      let tiers = [
+        all.filter { $0.name.lowercased() == want },
+        all.filter { $0.name.lowercased().hasPrefix(want) },
+        all.filter { $0.name.lowercased().contains(want) },
+      ]
+      guard let tier = tiers.first(where: { !$0.isEmpty }) else {
         say("gtg-listen: no input device matching \(wanted). Try: gtg mic")
+        exit(1)
+      }
+      guard tier.count == 1, let hit = tier.first else {
+        let names = tier.map(\.name).joined(separator: ", ")
+        say("gtg-listen: \(wanted) matches more than one input (\(names)). Try: gtg mic")
         exit(1)
       }
       // AudioUnitSetProperty on the AUHAL, not AUAudioUnit.setDeviceID.
@@ -288,12 +308,26 @@ struct Main {
     }
     if debug { say("target format: \(fmt)") }
 
+    // APPEND, never replace.
+    //
+    // results is an ordered sequence of PHRASES, not one growing transcript.
+    // A sentence with a pause in it arrives as two, and keeping only the
+    // latest threw the first one away -- so "ten ring dips and a thirty second
+    // back stretch" could log the back stretch alone and look like a success.
+    // Caught in review; the debug output had been showing five separate
+    // result lines all along, and only the last was being kept.
     let text = TextBox()
     let collector = Task {
       do {
         for try await r in transcriber.results {
-          if debug { say("result: \(String(r.text.characters))") }
-          await text.set(String(r.text.characters))
+          let phrase = String(r.text.characters)
+          if debug { say("result(final=\(r.isFinal)): \(phrase)") }
+          // Volatile results are running guesses at a phrase still being
+          // spoken, and each supersedes the last. Appending those would
+          // stutter the transcript, so only a finished phrase is kept.
+          // reportingOptions is empty, so none should arrive; this does not
+          // depend on that staying true.
+          if r.isFinal { await text.append(phrase) }
         }
       } catch {
         if debug { say("results failed: \(error)") }
@@ -362,11 +396,15 @@ struct Main {
   }
 }
 
-// The transcript, reachable from the collector task and the main one.
+// The transcript, reachable from the collector task and the main one. One
+// phrase at a time, in the order they were spoken.
 actor TextBox {
-  private var value = ""
-  func set(_ s: String) { value = s }
-  func get() -> String { value }
+  private var parts: [String] = []
+  func append(_ s: String) {
+    let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !t.isEmpty { parts.append(t) }
+  }
+  func get() -> String { parts.joined(separator: " ") }
 }
 
 // One converter per incoming format, built on demand from the buffers that
