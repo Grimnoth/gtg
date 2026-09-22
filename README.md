@@ -42,6 +42,21 @@ one you would have to trust.
 
 `install.sh` is idempotent. Re-run it after editing anything in `bin/`.
 
+## Changing it
+
+```sh
+./ship "what changed"
+```
+
+Tests, commits, pushes, and deploys to this Mac. One word, because it was
+never really one step: the working tree IS the running tool, since launchd and
+the menu bar execute `bin/` directly, but `hammerspoon/gtg.lua` is a COPY that
+`install.sh` puts in place. Editing the menu bar and pushing left the pushed
+version and the running version disagreeing until the next reload.
+
+A failing suite stops everything. Nothing reaches GitHub and nothing reaches
+the running tool on a red run.
+
 ## Use
 
 ```
