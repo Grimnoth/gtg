@@ -112,6 +112,31 @@ fi
 
 [ -n "$WHICH" ] && { printf '%s\n' "$*"; exit 0; }
 
+# --- a fragment is not a report ----------------------------------------------
+# One word that names several movements is a question, not a report, and the
+# whole tool already knows that: resolve_movement refuses an ambiguous match
+# on purpose, because guessing once merged "Incline Press" into "Decline
+# Press" with nothing in the log to say so.
+#
+# A model given the same word does not refuse. It picks. Asked to read
+# "squats." it answered "Air Squats x10" -- the commoner of the two squats,
+# with a rep count taken from the usual values -- and logged a set that never
+# happened. The word was all that survived of "I just did 5 Bulgarian split
+# squats", because the microphone was not open yet.
+#
+# So the doctrine applies here too, before the model is asked at all.
+if [ "$(printf '%s' "$key" | wc -w | tr -d ' ')" -le 1 ]; then
+  want=$(printf '%s\n' "$text" | awk "$AWK_KEY"'{print key($0)}')
+  hits=$(known_movements | awk -F'\t' -v w="$want" '
+           w != "" && index($1, w) > 0 { if (!($2 in seen)) { seen[$2]; n++ } }
+           END { print n+0 }')
+  if [ "${hits:-0}" -gt 1 ]; then
+    note "interpret: \"$text\" could be $hits movements; not guessing" \
+      >>"$NUDGE_LOG" 2>/dev/null || true
+    exit 0
+  fi
+fi
+
 # --- the prompt --------------------------------------------------------------
 # A QUOTED heredoc for the fixed text and printf for everything else. Nothing
 # variable is ever interpolated by the shell: an unquoted heredoc evaluates
@@ -154,6 +179,11 @@ RULES
   Write a time EXACTLY as it was said, and only when one was said. "7am" is
   @7am. Never round it, never add minutes that were not spoken, and never
   copy a time out of the examples above.
+  NEVER supply a rep count or a duration that was not said. The "usually"
+  values above are context for choosing the MOVEMENT, never numbers to copy
+  into the answer. A report with no number gets no number: gtg fills that in
+  itself, from the log, and it does it correctly. Writing "x10" because the
+  movement is usually 10 records a set that nobody did.
   Never invent a weight. A remembered weight is added later and must not be
   repeated here. Write a weight only when the report names one.
   A movement that is genuinely not in the list gets a short clean name in the

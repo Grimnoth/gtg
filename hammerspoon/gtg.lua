@@ -151,9 +151,20 @@ local listening = false
 local function sayIt()
   if listening then return end
   listening = true
-  local box = hs.alert.show("MIC  listening...", true)
-  local ping = hs.sound.getByName("Ping")
-  if ping then ping:play() end
+  -- NOTHING SAYS "SPEAK" UNTIL THE MICROPHONE IS OPEN.
+  --
+  -- The Ping and the box used to fire the instant the key was pressed, while
+  -- gtg-listen still had a process to start, an asset check to make and an
+  -- audio engine to bring up -- measured at 0.7 to 1.0 seconds. Everything
+  -- said in that window was never recorded at all. "I just did 5 Bulgarian
+  -- split squats" arrived as "squats", and one word was enough for the reader
+  -- downstream to pick the wrong movement and log a set that never happened.
+  --
+  -- So this box is deliberately quiet and says the opposite of go. The Ping
+  -- comes later, when gtg-listen prints its readiness line, and that line is
+  -- the only thing that means the microphone is live.
+  local box = hs.alert.show("starting the mic\u{2026}", true)
+  local ready = false
 
   -- BOTH callbacks accumulate.
   --
@@ -190,6 +201,23 @@ local function sayIt()
     refresh()
   end
 
+  -- A WATCHDOG, because the worst outcome here is not a wrong alert.
+  --
+  -- `listening` guards against a second press, and only draw() clears it. If
+  -- draw() ever fails to run -- a callback that never fires, a task that never
+  -- reaps -- the hotkey is dead for the rest of the session and the only cure
+  -- is reloading Hammerspoon, which nobody will connect to this. The two
+  -- stages bound themselves at 20s and 25s, so 90s cannot fire early on a
+  -- healthy run.
+  hs.timer.doAfter(90, function()
+    if not drawn then
+      drawn = true
+      listening = false
+      if box then hs.alert.closeSpecific(box) end
+      hs.alert.show("gtg say gave no answer", 3)
+    end
+  end)
+
   local ended = false
   local t = hs.task.new(GTG, function(_, out, err)
     keep(out, err)
@@ -203,10 +231,21 @@ local function sayIt()
       if ended then draw() end
       return true
     end
+    local seen = table.concat(got.err)
+
+    -- gtg-listen has opened the microphone. NOW invite speech.
+    if not ready and seen:match("listening") then
+      ready = true
+      if box then hs.alert.closeSpecific(box) end
+      box = hs.alert.show("\u{1F3A4}  SPEAK NOW", true)
+      local ping = hs.sound.getByName("Ping")
+      if ping then ping:play() end
+    end
+
     -- The box stops claiming to listen once it has stopped. One that still
     -- says "listening" while a model reads the line teaches you to talk over
     -- it.
-    local heard = table.concat(got.err):match("heard: ([^\n]+)")
+    local heard = seen:match("heard: ([^\n]+)")
     if heard and box and not drawn then
       hs.alert.closeSpecific(box)
       box = hs.alert.show('"' .. heard .. '"', true)

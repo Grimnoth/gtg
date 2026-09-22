@@ -201,23 +201,38 @@ struct Main {
       reportingOptions: [],
       attributeOptions: [])
 
-    // Apple installs the locale's model once, then never again. It is a few
-    // seconds the first time and nothing after that, so it is not worth a
-    // separate setup step that can be forgotten.
-    if let req = try? await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+    // ASK FIRST, and only install when something is actually missing.
+    //
+    // Requesting the installation unconditionally cost most of a second on
+    // every single launch and printed "installing the speech model" every
+    // time, long after it was installed. That second is not a tidiness
+    // problem: it is a second of a person talking into a microphone that is
+    // not open yet, and the front of the sentence is gone for good. "I just
+    // did 5 Bulgarian split squats" reached the log as "squats".
+    let t0 = Date()
+    if debug { say(String(format: "+%.0fms transcriber built", Date().timeIntervalSince(t0) * 1000)) }
+    let status = await AssetInventory.status(forModules: [transcriber])
+    if debug { say(String(format: "+%.0fms asset status = \(status)", Date().timeIntervalSince(t0) * 1000)) }
+    if status != .installed {
       say("installing the speech model (once)...")
-      try? await req.downloadAndInstall()
+      if let req = try? await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+        try? await req.downloadAndInstall()
+      }
     }
 
     let analyzer = SpeechAnalyzer(modules: [transcriber])
+    if debug { say(String(format: "+%.0fms analyzer", Date().timeIntervalSince(t0) * 1000)) }
+    defer { if debug { say("(exiting)") } }
     guard let fmt = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber])
     else {
       say("gtg-listen: no usable audio format")
       exit(1)
     }
 
+    if debug { say(String(format: "+%.0fms bestAvailableAudioFormat", Date().timeIntervalSince(t0) * 1000)) }
     let engine = AVAudioEngine()
     let input = engine.inputNode
+    if debug { say(String(format: "+%.0fms inputNode", Date().timeIntervalSince(t0) * 1000)) }
 
     if let wanted {
       // Exact, then prefix, then substring, and each tier must match exactly
@@ -334,10 +349,12 @@ struct Main {
       }
     }
 
+    if debug { say(String(format: "+%.0fms tap installed", Date().timeIntervalSince(t0) * 1000)) }
     do { try await analyzer.start(inputSequence: stream) } catch {
       say("gtg-listen: cannot start the recognizer: \(error.localizedDescription)")
       exit(1)
     }
+    if debug { say(String(format: "+%.0fms analyzer.start", Date().timeIntervalSince(t0) * 1000)) }
     engine.prepare()
     do { try engine.start() } catch {
       say("gtg-listen: cannot open the microphone: \(error.localizedDescription)")
@@ -354,6 +371,11 @@ struct Main {
     onInt.resume()
     onTerm.resume()
 
+    if debug { say(String(format: "+%.0fms READY", Date().timeIntervalSince(t0) * 1000)) }
+    // THE READINESS MARKER. The caller must not tell anyone to speak before
+    // this line appears: everything before it is setup, and the microphone is
+    // shut. hammerspoon/gtg.lua waits for it, so do not reword it without
+    // changing that too.
     say("listening...")
 
     // Three ways to stop, and none of them is you remembering to:

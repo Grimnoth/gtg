@@ -545,7 +545,13 @@ record() {
   # `[ skip ] || calendar_event ... >/dev/null &` did -- the redirect covered
   # the inner command while the backgrounded LIST kept the pipe. Measured: a
   # menu click took 8s to confirm. The if form redirects the child itself.
-  if [ "$2" != skip ]; then
+  # GTG_NO_CALENDAR exists because the state-dir override is not enough
+  # isolation on its own. A scratch run started from a COPY of the real
+  # plan.txt inherits its CALENDAR= line, so the log lands in a throwaway file
+  # while the events land in the real Google calendar. That happened on
+  # 2026-09-22: nine test sets reached the calendar and had to be deleted by
+  # hand. Set this for any run that is not a real set.
+  if [ "$2" != skip ] && [ -z "${GTG_NO_CALENDAR:-}" ]; then
     calendar_event "$(fmt_piece "$1" "$2" "${4:-}" "${5:-}")" "$ts" "$3" </dev/null >/dev/null 2>&1 &
   fi
   [ -n "${GTG_NO_PAGE:-}" ] && return 0

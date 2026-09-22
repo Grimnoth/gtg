@@ -632,6 +632,51 @@ STUB_ANSWER='ring dips x99' GTG_INTERPRET_CMD="$TMP/bin/stub" \
 is "a line the parser understands is not sent" "$(stub_calls)" "0"
 is "  and is logged as typed" "$(tail -1 "$GTG_STATE_DIR/log.tsv" | cut -f3)" "5"
 
+echo "== a fragment is not a report =="
+# 2026-09-22, the first real use: the microphone was not open yet, so "I just
+# did 5 Bulgarian split squats" reached the reader as "squats" -- and the
+# reader picked the commoner of the two squats and supplied a rep count from
+# the usual values. A set nobody did was logged. resolve_movement refuses an
+# ambiguous match on purpose; a model given the same word does not refuse, it
+# picks. So the refusal happens before the model is asked.
+reset_plan; stub_reset
+GTG_NEW=log record_batch 'air squats x10' home >/dev/null 2>&1
+GTG_NEW=log record_batch 'bulgarian split squats x10' home >/dev/null 2>&1
+STUB_ANSWER='air squats x10' GTG_INTERPRET_CMD="$TMP/bin/stub" \
+  ./bin/gtg 'squats' >/dev/null 2>"$TMP/e"
+is "one word naming two movements is refused" "$?" "1"
+is "  the reader is never even asked" "$(stub_calls)" "0"
+is "  and nothing is logged" "$(tail -1 "$GTG_STATE_DIR/log.tsv" | cut -f2)" \
+  "bulgarian split squats"
+is "  with the reason written down" \
+  "$(grep -c 'could be 2 movements' "$GTG_STATE_DIR/nudge.log")" "1"
+
+# One word naming exactly ONE movement is still fine: the rule is about
+# ambiguity, not about brevity.
+reset_plan; stub_reset
+STUB_ANSWER='pull-ups x5' GTG_INTERPRET_CMD="$TMP/bin/stub" \
+  ./bin/gtg 'pullups' >/dev/null 2>&1
+is "one word naming one movement still resolves" \
+  "$(tail -1 "$GTG_STATE_DIR/log.tsv" | cut -f2)" "pull-ups"
+
+echo "== the calendar can be held back =="
+# The state-dir override is not enough isolation on its own. A scratch run
+# started from a COPY of the real plan.txt inherits its CALENDAR= line, so the
+# log lands in a throwaway file while the EVENTS land in the real Google
+# calendar. Nine test sets reached it on 2026-09-22 and came out by hand.
+reset_plan
+calendar_event() { printf 'called\n' >>"$TMP/cal-calls"; }
+rm -f "$TMP/cal-calls"
+printf 'CALENDAR=Pretend\n' >>"$GTG_CONF_DIR/plan.txt"
+GTG_NO_PAGE=1 record 'pull-ups' 5 home >/dev/null 2>&1
+is "a plain record would write to the calendar" \
+  "$(wc -l <"$TMP/cal-calls" 2>/dev/null | tr -d ' ')" "1"
+GTG_NO_PAGE=1 GTG_NO_CALENDAR=1 record 'pull-ups' 5 home >/dev/null 2>&1
+is "  GTG_NO_CALENDAR holds it back" \
+  "$(wc -l <"$TMP/cal-calls" 2>/dev/null | tr -d ' ')" "1"
+unset -f calendar_event
+. ./bin/gtg-lib.sh
+
 echo "== the reader is found without a PATH =="
 # The one thing nobody tested first time, and it broke BOTH callers at once
 # while working perfectly from a terminal. launchd gives a job
