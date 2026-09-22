@@ -116,6 +116,24 @@ local function logText(text)
   return sh({ "--new", edited })
 end
 
+-- Deliberately large. These two are read at arm's length, on the way back
+-- from a set, by someone not looking for them -- which is the opposite of
+-- every other alert this file shows.
+local HOLD_STYLE = {
+  textSize = 34,
+  textColor = { white = 0.1, alpha = 1 },
+  fillColor = { red = 0.98, green = 0.75, blue = 0.15, alpha = 0.95 },
+  strokeColor = { white = 0.1, alpha = 0.6 },
+  radius = 14,
+}
+local SPEAK_STYLE = {
+  textSize = 34,
+  textColor = { white = 1, alpha = 1 },
+  fillColor = { red = 0.11, green = 0.6, blue = 0.25, alpha = 0.95 },
+  strokeColor = { white = 1, alpha = 0.6 },
+  radius = 14,
+}
+
 -- What to put on screen when it is over: the rows that landed, or the reason
 -- there are none. Never a bare "nothing heard" while the reason sits unread in
 -- stderr -- an alert that reports the wrong failure costs more than one that
@@ -160,10 +178,12 @@ local function sayIt()
   -- split squats" arrived as "squats", and one word was enough for the reader
   -- downstream to pick the wrong movement and log a set that never happened.
   --
-  -- So this box is deliberately quiet and says the opposite of go. The Ping
-  -- comes later, when gtg-listen prints its readiness line, and that line is
-  -- the only thing that means the microphone is live.
-  local box = hs.alert.show("starting the mic\u{2026}", true)
+  -- So the first box is an INSTRUCTION, not a status. "starting the mic..."
+  -- was information, and information loses to a habit: the key has been
+  -- pressed, and pressing the key is what means go, so it gets talked over.
+  -- HOLD says what to do instead. Big, amber and SILENT, because the Ping is
+  -- reserved for the moment it is actually true that speech is being heard.
+  local box = hs.alert.show("\u{23F3}  HOLD \u{2014} mic opening\u{2026}", HOLD_STYLE, true)
   local ready = false
 
   -- BOTH callbacks accumulate.
@@ -237,7 +257,7 @@ local function sayIt()
     if not ready and seen:match("listening") then
       ready = true
       if box then hs.alert.closeSpecific(box) end
-      box = hs.alert.show("\u{1F3A4}  SPEAK NOW", true)
+      box = hs.alert.show("\u{1F3A4}  SPEAK NOW", SPEAK_STYLE, true)
       local ping = hs.sound.getByName("Ping")
       if ping then ping:play() end
     end
