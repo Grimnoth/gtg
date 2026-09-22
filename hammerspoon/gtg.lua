@@ -169,19 +169,45 @@ local function sayIt()
     if e and e ~= "" then got.err[#got.err + 1] = e end
   end
 
-  local t = hs.task.new(GTG, function(_, out, err)
-    keep(out, err)
+  -- WHICHEVER CALLBACK FINISHES LAST DRAWS THE RESULT.
+  --
+  -- hs.task calls the streaming callback once more with a nil task after the
+  -- process ends, and the order of that against the termination callback is
+  -- not guaranteed. Drawing straight from termination therefore reads a
+  -- buffer that a trailing chunk has not reached yet, which is the same class
+  -- of bug as reading only the termination callback in the first place: an
+  -- alert that confidently reports the wrong outcome. Caught in review.
+  --
+  -- The grace timer covers the ordering the other way, where termination
+  -- lands first. Drawn once, guarded, so neither path can double it.
+  local drawn = false
+  local function draw()
+    if drawn then return end
+    drawn = true
     listening = false
     if box then hs.alert.closeSpecific(box) end
     hs.alert.show(outcome(table.concat(got.out), table.concat(got.err)), 4)
     refresh()
-  end, function(_, out, err)
+  end
+
+  local ended = false
+  local t = hs.task.new(GTG, function(_, out, err)
     keep(out, err)
+    ended = true
+    hs.timer.doAfter(0.25, draw)
+  end, function(task, out, err)
+    keep(out, err)
+    -- task is nil on the final call. Nothing is still in flight then, so if
+    -- the process has already been reaped there is nothing left to wait for.
+    if task == nil then
+      if ended then draw() end
+      return true
+    end
     -- The box stops claiming to listen once it has stopped. One that still
     -- says "listening" while a model reads the line teaches you to talk over
     -- it.
     local heard = table.concat(got.err):match("heard: ([^\n]+)")
-    if heard and box then
+    if heard and box and not drawn then
       hs.alert.closeSpecific(box)
       box = hs.alert.show('"' .. heard .. '"', true)
     end
