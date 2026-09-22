@@ -1,5 +1,26 @@
 # gtg
 
+> ## Read this before you read the code
+>
+> **This is a raw personal tool. Don't judge me on the code quality.**
+>
+> I vibed it together on my own Mac, for me, to solve my own problem. It's
+> cobbled together. It is not production ready, it is not a product, and it
+> isn't trying to become one. No support, no roadmap, no issues queue, and no
+> promise it runs anywhere but my machine.
+>
+> It hardcodes my habits, my waking hours and my movements. It assumes macOS 26,
+> Hammerspoon, and a Claude subscription. Plenty of it is held together with
+> shell and hope. If you're reading this looking for a reference implementation
+> of anything, you're in the wrong repo.
+>
+> So why put it up at all? Because the point isn't the code. The point is that
+> you can build a rough thing that serves one real purpose in an afternoon, and
+> it can start changing what you actually do long before it's anything you'd
+> call finished. That's the whole idea. This one gets me doing pull-ups.
+>
+> Take the ideas. Don't take the code.
+
 An hourly nudge to do a grease-the-groove set, and a one-word way to log it.
 
 No server, no webhook, no running agent. macOS already ships the scheduler
