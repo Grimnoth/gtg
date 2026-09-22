@@ -10,7 +10,30 @@ LABEL="com.grimnoth.gtg"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 mkdir -p "$CONF_DIR" "$STATE_DIR" "$HOME/.local/bin" "$HOME/Library/LaunchAgents"
-chmod +x "$REPO/bin/gtg" "$REPO/bin/gtg-nudge" "$REPO/bin/gtg-page"
+chmod +x "$REPO/bin/gtg" "$REPO/bin/gtg-nudge" "$REPO/bin/gtg-page" "$REPO/bin/gtg-interpret"
+
+# --- gtg say (optional) -----------------------------------------------------
+# On-device speech, through the framework macOS 26 ships. It is compiled here
+# rather than shipped as a binary so there is nothing to trust and nothing to
+# sign, and the whole feature is skipped when there is no compiler: `gtg say`
+# is a convenience, and an install that fails over a convenience is worse than
+# one without it.
+if command -v swiftc >/dev/null 2>&1; then
+  if [ ! -x "$REPO/bin/gtg-listen" ] \
+     || [ "$REPO/bin/gtg-listen.swift" -nt "$REPO/bin/gtg-listen" ]; then
+    if swiftc -O -parse-as-library -o "$REPO/bin/gtg-listen" "$REPO/bin/gtg-listen.swift" \
+         2>"$STATE_DIR/build.log"; then
+      echo "built    bin/gtg-listen  (gtg say)"
+    else
+      echo "WARN     bin/gtg-listen did not build; gtg say is off."
+      echo "         See $STATE_DIR/build.log"
+    fi
+  else
+    echo "current  bin/gtg-listen"
+  fi
+else
+  echo "skipped  gtg say (no swiftc; install Xcode or its command line tools)"
+fi
 
 # --- plan.txt: seeded once, then it is yours. Never overwritten. -------------
 if [ ! -f "$CONF_DIR/plan.txt" ]; then
@@ -90,5 +113,21 @@ if ! command -v icalBuddy >/dev/null 2>&1; then
   echo "         nudges will fire during meetings. Fix: brew install ical-buddy"
 fi
 
+# --- reading a sentence -----------------------------------------------------
+if ! command -v claude >/dev/null 2>&1 && ! command -v codex >/dev/null 2>&1; then
+  echo
+  echo "NOTE     neither claude nor codex is on PATH, so a line the parser"
+  echo "         cannot read is refused rather than interpreted. That is the"
+  echo "         old behaviour, not a fault. See INTERPRET= in plan.txt."
+fi
+
 echo
-echo "Done. Try:  gtg plan   |   gtg   |   gtg week"
+if [ -x "$REPO/bin/gtg-listen" ]; then
+  echo "Done. Try:  gtg mic   |   gtg say   |   gtg week"
+  echo
+  echo "Run 'gtg mic' FIRST. The system default input is often the wrong one:"
+  echo "an interface with nothing plugged in records silence, and one with"
+  echo "loopback records whatever is playing on the Mac."
+else
+  echo "Done. Try:  gtg plan   |   gtg   |   gtg week"
+fi

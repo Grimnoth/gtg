@@ -26,6 +26,25 @@ SOUND=Ping
 # SPEAK=yes reads the exercise aloud. Genuinely hard to ignore.
 SPEAK=
 
+# Who reads a line the parser could not. A movement it knows is logged by the
+# parser and never goes near a model; this runs on the miss, which in practice
+# means a sentence or a dictation.
+#
+#   claude        Claude Code, sonnet (the default). Measured 7.0s.
+#   claude opus   the same, slower and no better at this.
+#   codex         the Codex CLI. Measured 8.0s, and it read the syntax
+#                 template as literal text on the first try.
+#   off           no reader. An unfamiliar line is refused, as before.
+#
+# Both run on a subscription you already pay for. Neither takes an API key.
+INTERPRET=claude
+
+# The microphone `gtg say` listens on, by name; a prefix is enough. Empty means
+# the system default input, which is often not what you want: an audio
+# interface records silence when nothing is plugged into it, and one with
+# loopback records whatever is PLAYING on the Mac. `gtg mic` lists them.
+MIC=
+
 # A calendar to mirror every set onto, as a zero-minute event at the set's own
 # time, so the history is on your phone and in the calendar you already look
 # at. Create it in Google Calendar (or Calendar.app) first; empty = off.

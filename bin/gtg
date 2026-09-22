@@ -22,7 +22,12 @@ gtg @-90m push-ups x20          90 minutes ago
 gtg @"yesterday 6pm" ring dips x5
 gtg when 8am   show how a time would be read, without logging
 
+gtg say        press, speak, done. Says a set out loud and logs it
+gtg mic        which microphone `gtg say` listens on (gtg mic 3 to pick)
 gtg options    list today's choices
+gtg off        no more nudges today (gtg off sick / gtg off 2h / gtg off 3d)
+gtg on         start them again
+gtg status     one block: where, the pick, today's sets, whether it is paused
 gtg home       count the network you are on now as home
 gtg where      home or away, and why
 gtg skip       record a miss
@@ -84,8 +89,120 @@ at_note() {
 where=$(where_am_i)
 line=$(primary_option "$where")
 
+# Today's sets, the hour strip and the tally. A function rather than only a
+# case branch because `status` prints it too, and the menu bar reads that: two
+# renderings of "today" would be two things that can disagree.
+today_report() {
+  local today
+  today=$(date '+%Y-%m-%d')
+  if pause_active; then
+    printf 'nudges are off until %s%s\n\n' \
+      "$(pause_human "$PAUSE_UNTIL")" "${PAUSE_WHY:+ ($PAUSE_WHY)}"
+  fi
+  if [ ! -s "$LOG" ]; then echo "nothing logged yet"; return 0; fi
+  waking_bounds
+  # clean() on the name, not the raw field: rows written before weight and
+  # duration had columns still carry them inside the name, and without this
+  # a legacy "pull-ups x5" would render as "pull-ups x5 x5".
+  #
+  # Sorted, because the log is append-only: a set backdated with `gtg @8am`
+  # sits at the END of the file describing the MORNING, and unsorted it
+  # printed below sets that happened hours after it. ISO timestamps in the
+  # first column make a plain lexicographic sort the right one.
+  sort "$LOG" | awk -F'\t' -v d="$today" -v ws="$WAKE_S" -v we="$WAKE_E" \
+      -v nowh="$(date +%-H)" "$AWK_CLEAN$AWK_HUMAN"'
+    index($1, d) == 1 {
+      n++
+      if ($3 != "skip") hh[substr($1, 12, 2) + 0]++
+      if ($3 ~ /^[0-9]+$/) reps += $3
+      # A skipped set contributes no time. Totalling its duration counted a
+      # miss as work done.
+      if ($6 != "" && $3 != "skip") secs += $6
+      printf "  %s  %s%s%s\n", substr($1, 12, 5), clean($2), human($3, $5, $6), \
+             ($3 == "skip" ? "  (skipped)" : "")
+    }
+    END {
+      if (n == 0) { print "  nothing yet today"; exit }
+      # Grease-the-groove lives on SPREAD, not on the count: ten sets in one
+      # clump after lunch is a workout, not the method. One cell per waking
+      # hour: # got a set, . passed empty, - still ahead.
+      #
+      # A set before WAKE_START widens the strip to reach it. The sets
+      # done before the first nudge are the ones this tool most wants,
+      # and the menu bar read "3 · 0/0h" on a morning that had three.
+      for (h in hh) if (h + 0 < ws) ws = h + 0
+      l1 = "  "; l2 = "  "; cov = 0; sofar = 0
+      for (h = ws; h < we; h++) {
+        l1 = l1 sprintf("%02d ", h)
+        if (h > nowh) mark = "-"
+        else { sofar++; if (h in hh) { mark = "#"; cov++ } else mark = "." }
+        l2 = l2 " " mark " "
+      }
+      print ""; print l1; print l2
+      # Whole minutes only, the same rule fmt_dur uses: 90s totalled as
+      # "1 min" quietly lost half a minute.
+      printf "\n%d set(s)%s%s today, in %d of %d waking hours so far\n", n, \
+             (reps ? ", " reps " reps" : ""), \
+             (secs ? ", " ((secs >= 60 && secs % 60 == 0) ? int(secs/60) " min" : secs "s") : ""), \
+             cov, sofar
+    }'
+}
+
 case "${1:-done}" in
   help|-h|--help) usage ;;
+
+  say)
+    # Press a key, say what you did, and it is logged. The whole point is that
+    # this costs nothing: no window to find, no field to focus, no typing. A
+    # set remembered at the top of the stairs is a set logged.
+    #
+    # It EXECS the ordinary free-text path rather than reimplementing it, so a
+    # spoken "@7:15 pull-ups" backdates, a spoken "not today" stops the
+    # nudges, and a spoken round splits on "and" -- all of it, for free, and
+    # none of it able to drift from what typing the same words does.
+    listener="$LIB_DIR/gtg-listen"
+    if [ ! -x "$listener" ]; then
+      echo "gtg-listen is not built: run ./install.sh (it needs Xcode's swiftc)." >&2
+      exit 1
+    fi
+    mic=$(cfg MIC)
+    if [ -n "$mic" ]; then heard=$("$listener" --device "$mic"); else heard=$("$listener"); fi
+    [ -n "${heard:-}" ] || exit 1
+    printf 'heard: %s\n' "$heard" >&2
+    exec "$0" "$heard"
+    ;;
+
+  mic)
+    # Which microphone `gtg say` listens on. This exists because the obvious
+    # default is wrong here and silently so: the system default input on this
+    # Mac is an audio interface with nothing plugged in, which records a flat
+    # -71 dB, and its loopback channels carry whatever is PLAYING on the Mac.
+    # Left to the default, the first thing this ever transcribed was a podcast.
+    listener="$LIB_DIR/gtg-listen"
+    if [ ! -x "$listener" ]; then
+      echo "gtg-listen is not built: run ./install.sh (it needs Xcode's swiftc)." >&2
+      exit 1
+    fi
+    cur=$(cfg MIC)
+    if [ -n "${2:-}" ]; then
+      # A number picks off the list; anything else is a name, matched the way
+      # the listener matches it.
+      if printf '%s' "$2" | grep -qE '^[0-9]+$'; then
+        pick=$("$listener" --list | sed -n "${2}p")
+        [ -n "$pick" ] || { echo "no input device $2; run: gtg mic" >&2; exit 1; }
+      else
+        pick="$2"
+      fi
+      cfg_set MIC "$pick" || exit 1
+      echo "gtg say will listen on: $pick"
+    else
+      "$listener" --list | awk -v cur="$cur" '
+        { printf "  %d  %s%s\n", NR, $0, (cur != "" && index($0, cur) == 1 ? "   <- in use" : "") }'
+      echo
+      if [ -n "$cur" ]; then echo "MIC=$cur in plan.txt. Change it: gtg mic 3"
+      else echo "No MIC= set, so the system default is used. Pick one: gtg mic 3"; fi
+    fi
+    ;;
 
   plan) cat "$PLAN" ;;
 
@@ -287,6 +404,10 @@ case "${1:-done}" in
       rest ~ /^skip: outside/      { so++; next }
       rest ~ /^skip: debounced/    { sd++; next }
       rest ~ /^skip: in a meeting/ { sm++; next }
+      # A day turned off on purpose is not a day of dialogs ignored, and
+      # counting the two together would read as a collapse in compliance.
+      rest ~ /^skip: paused/       { sp++; next }
+      rest ~ /^(paused|resumed)/   { next }
       rest ~ /^skip:/              { sx++; next }
       rest ~ /^catch-up shown/     { cs++; next }
       rest ~ /^catch-up done: /    { split(rest, a, " "); cl += a[3]; next }
@@ -317,6 +438,7 @@ case "${1:-done}" in
           printf "  %-12s %3d  %3d%%\n", o, c[o], (total ? int(c[o] * 100 / total + 0.5) : 0)
         }
         printf "  skipped: %d outside hours, %d debounced, %d in a meeting", so, sd, sm
+        if (sp) printf ", %d turned off", sp
         if (sx) printf ", %d other", sx
         printf "\n"
         printf "  catch-up: %d shown, %d sets logged\n", cs, cl
@@ -333,55 +455,50 @@ case "${1:-done}" in
       }' "$NUDGE_LOG"
     ;;
 
-  today)
-    today=$(date '+%Y-%m-%d')
-    if [ ! -s "$LOG" ]; then echo "nothing logged yet"; exit 0; fi
-    waking_bounds
-    # clean() on the name, not the raw field: rows written before weight and
-    # duration had columns still carry them inside the name, and without this
-    # a legacy "pull-ups x5" would render as "pull-ups x5 x5".
+  today) today_report ;;
+
+  status)
+    # Everything the menu bar draws, in ONE process. It used to make three
+    # calls on every click -- `today`, `where` and `options` -- which measured
+    # just over a second on this Mac, and a menu that shells out while you
+    # wait is a menu that feels broken. No second implementation of anything:
+    # these are the same functions every other command uses.
+    printf 'where: %s\n' "$where"
+    printf 'pick: %s\n' "$line"
+    if pause_active; then
+      printf 'paused: %s%s\n' "$(pause_human "$PAUSE_UNTIL")" "${PAUSE_WHY:+ ($PAUSE_WHY)}"
+    fi
+    echo
+    today_report
+    ;;
+
+  off|pause)
+    # "Nah, dog, stop sending me these things." A day with no set coming is a
+    # day of nine useless dialogs, and a reminder you cannot turn off is a
+    # reminder you learn to ignore -- which costs every later day too.
     #
-    # Sorted, because the log is append-only: a set backdated with `gtg @8am`
-    # sits at the END of the file describing the MORNING, and unsorted it
-    # printed below sets that happened hours after it. ISO timestamps in the
-    # first column make a plain lexicographic sort the right one.
-    sort "$LOG" | awk -F'\t' -v d="$today" -v ws="$WAKE_S" -v we="$WAKE_E" \
-        -v nowh="$(date +%-H)" "$AWK_CLEAN$AWK_HUMAN"'
-      index($1, d) == 1 {
-        n++
-        if ($3 != "skip") hh[substr($1, 12, 2) + 0]++
-        if ($3 ~ /^[0-9]+$/) reps += $3
-        # A skipped set contributes no time. Totalling its duration counted a
-        # miss as work done.
-        if ($6 != "" && $3 != "skip") secs += $6
-        printf "  %s  %s%s%s\n", substr($1, 12, 5), clean($2), human($3, $5, $6), \
-               ($3 == "skip" ? "  (skipped)" : "")
-      }
-      END {
-        if (n == 0) { print "  nothing yet today"; exit }
-        # Grease-the-groove lives on SPREAD, not on the count: ten sets in one
-        # clump after lunch is a workout, not the method. One cell per waking
-        # hour: # got a set, . passed empty, - still ahead.
-        #
-        # A set before WAKE_START widens the strip to reach it. The sets
-        # done before the first nudge are the ones this tool most wants,
-        # and the menu bar read "3 · 0/0h" on a morning that had three.
-        for (h in hh) if (h + 0 < ws) ws = h + 0
-        l1 = "  "; l2 = "  "; cov = 0; sofar = 0
-        for (h = ws; h < we; h++) {
-          l1 = l1 sprintf("%02d ", h)
-          if (h > nowh) mark = "-"
-          else { sofar++; if (h in hh) { mark = "#"; cov++ } else mark = "." }
-          l2 = l2 " " mark " "
-        }
-        print ""; print l1; print l2
-        # Whole minutes only, the same rule fmt_dur uses: 90s totalled as
-        # "1 min" quietly lost half a minute.
-        printf "\n%d set(s)%s%s today, in %d of %d waking hours so far\n", n, \
-               (reps ? ", " reps " reps" : ""), \
-               (secs ? ", " ((secs >= 60 && secs % 60 == 0) ? int(secs/60) " min" : secs "s") : ""), \
-               cov, sofar
-      }' 
+    # It always ends by itself. No argument means the rest of today, so the
+    # nudges are back tomorrow morning without anything to remember.
+    parse_pause "$*" || { PAUSE_FOR=""; PAUSE_REASON=""; }
+    if ! ends=$(pause_ends "$PAUSE_FOR"); then
+      echo "could not read \"$PAUSE_FOR\" as a stretch of time; try 2h, 90m or 3d" >&2
+      exit 1
+    fi
+    pause_set "$ends" "$PAUSE_REASON"
+    note "paused until $(pause_human "$ends")${PAUSE_REASON:+ ($PAUSE_REASON)}" >>"$NUDGE_LOG"
+    printf 'nudges off until %s%s\n' "$(pause_human "$ends")" "${PAUSE_REASON:+ ($PAUSE_REASON)}"
+    echo "  gtg on   turns them back on"
+    ;;
+
+  on|resume)
+    if pause_active; then
+      until=$(pause_human "$PAUSE_UNTIL")
+      rm -f "$PAUSE"
+      note "resumed (was off until $until)" >>"$NUDGE_LOG"
+      echo "nudges back on"
+    else
+      echo "nudges are already on"
+    fi
     ;;
 
   week)
@@ -469,10 +586,20 @@ case "${1:-done}" in
     if printf '%s' "$1" | grep -qE '^[0-9]+$'; then
       echo "logged: $(record_option "$line" "$where" "$1")  [$where]$(at_note)"
     else
+      # The menu bar and the nudge have one text field and no subcommands, so
+      # "not today" arrives here as a whole line rather than as `gtg off`.
+      # Same words, same answer, wherever it is typed.
+      if parse_pause "$1"; then
+        if ! ends=$(pause_ends "$PAUSE_FOR"); then ends=$(pause_ends); fi
+        pause_set "$ends" "$PAUSE_REASON"
+        note "paused until $(pause_human "$ends")${PAUSE_REASON:+ ($PAUSE_REASON)}" >>"$NUDGE_LOG"
+        printf 'nudges off until %s%s\n' "$(pause_human "$ends")" "${PAUSE_REASON:+ ($PAUSE_REASON)}"
+        exit 0
+      fi
       # Anything else is whatever you actually did: gtg "chin-ups x8", or a
       # whole round with "and" or ";" between sets. An unknown movement is a
       # question, not a guess: nothing is recorded until you say --new.
-      out=$(record_batch "$1" "$where"); rc=$?
+      out=$(record_smart "$1" "$where"); rc=$?
       case "$rc" in
         0) printf '%s\n' "$out" | sed 's/^/logged: /'
            echo "        [$where]$(at_note)" ;;

@@ -21,6 +21,30 @@ done
 
 export GTG_STATE_DIR="$TMP/state" GTG_CONF_DIR="$TMP/conf"
 mkdir -p "$GTG_STATE_DIR" "$GTG_CONF_DIR"
+
+# NO TEST EVER REACHES A MODEL. /usr/bin/true prints nothing, which is the
+# interpreter's fail-open answer, so every pre-existing test keeps the exact
+# behaviour it was written against. The tests that do exercise the interpreter
+# point this at a stub script instead.
+#
+# It is set here rather than per test because the cost of forgetting is not a
+# flake: `claude -p` under a redirected HOME answers "Not logged in - Please
+# run /login" on stdout and exits 0, so a suite that leaked into it tested the
+# shape of an error message.
+export GTG_INTERPRET_CMD=/usr/bin/true
+
+# A stand-in for the model: prints $STUB_ANSWER, records that it was called.
+mkdir -p "$TMP/bin"
+cat >"$TMP/bin/stub" <<'STUB'
+#!/bin/sh
+cat >"$STUB_SAW"
+echo "$STUB_CALLS" >>"$STUB_SAW.n"
+printf '%s\n' "$STUB_ANSWER"
+STUB
+chmod +x "$TMP/bin/stub"
+stub_calls() { [ -f "$STUB_SAW.n" ] && wc -l <"$STUB_SAW.n" | tr -d ' ' || echo 0; }
+stub_reset() { rm -f "$STUB_SAW" "$STUB_SAW.n"; }
+export STUB_SAW="$TMP/stub-saw"
 # Belt and braces: with HOME redirected, a regression in either override lands
 # in a scratch path instead of the real account.
 export HOME="$TMP/home"
@@ -196,7 +220,8 @@ is "gtg <text>: no not-found" "$(printf '%s' "$out" | grep -c 'not found')" "0"
 missing=0
 for fn in record record_option record_batch new_for resolve_movement \
           known_movements plan_add last_weight_for read_piece parse_piece \
-          fmt_piece fmt_dur fmt_wt decorate_weights today_options; do
+          fmt_piece fmt_dur fmt_wt decorate_weights today_options \
+          pause_active pause_ends pause_set pause_human parse_pause; do
   declare -f "$fn" >/dev/null 2>&1 || { missing=$((missing+1)); echo "         missing: $fn"; }
 done
 is "no called function is undefined" "$missing" "0"
@@ -374,6 +399,95 @@ in_waking_window 20 && ok  "20:00 still nudges"         || bad "20:00 still nudg
 in_waking_window 21 && bad "21:00 is already out"       "allowed" "skipped" || ok "21:00 is already out"
 in_waking_window 23 && bad "23:00 is out"               "allowed" "skipped" || ok "23:00 is out"
 
+echo "== not today: the nudges can be turned off =="
+# A day with no set coming is a day of nine useless dialogs, and a reminder
+# with no off switch is one you learn to ignore, which costs every later day
+# too. Every pause carries an end time, so the failure is never the opposite
+# one: switched off in February, noticed in May.
+reset_plan
+rm -f "$GTG_STATE_DIR/paused"
+pause_active && bad "off by default" "paused" "on" || ok "off by default"
+
+# The words, wherever they are typed. The menu bar and the nudge have one text
+# field and no subcommands, so "not today" arrives as a whole line.
+pp() { if parse_pause "$1"; then printf '%s|%s' "$PAUSE_FOR" "$PAUSE_REASON"; else printf 'SET'; fi; }
+is "bare off"                 "$(pp 'off')"                  "|"
+is "with a reason"            "$(pp 'off sick')"             "|sick"
+is "sick on its own"          "$(pp 'sick')"                 "|sick"
+is "a comma after it"         "$(pp 'not today, wrecked')"   "|wrecked"
+is "for a stretch"            "$(pp 'pause 90m bad back')"   "90m|bad back"
+is "any case"                 "$(pp 'OFF 2h')"               "2h|"
+# Every ordinary set must fall through, including one that starts with the
+# same letters: the word has to END there.
+is "a movement is a set"      "$(pp 'pull-ups x5')"          "SET"
+is "  even starting with off" "$(pp 'offset rows x5')"       "SET"
+is "  even with a comma"      "$(pp 'stairs, 2 flights')"    "SET"
+# A word starting with a digit is a stretch of time or a mistyped one, never a
+# reason. "2x" read as a reason would pause the whole day in silence.
+is "a mistyped stretch stays a stretch" "$(pp 'off 2x')"     "2x|"
+
+# The expiry is READ, never scheduled: nothing has to survive a reboot for the
+# nudges to come back, and a stale pause cannot outlive its day.
+pause_set "$(( $(date +%s) + 60 ))" "sick"
+pause_active; is "a live pause is on" "$?" "0"
+is "  and says why"                   "$PAUSE_WHY" "sick"
+pause_set "$(( $(date +%s) - 60 ))" "sick"
+pause_active && bad "an expired pause is off" "paused" "on" || ok "an expired pause is off"
+is "  and the file is gone" "$([ -f "$GTG_STATE_DIR/paused" ] && echo yes || echo no)" "no"
+# A file nobody can trust to expire must not be able to mute the tool for ever.
+printf 'soon\n' >"$GTG_STATE_DIR/paused"
+pause_active && bad "an unreadable pause is off" "paused" "on" || ok "an unreadable pause is off"
+
+# End to end: a paused fire opens nothing, says why, and leaves the slot
+# unburned. A window of 0..24 keeps this true at any hour the suite runs.
+reset_plan
+sed -i '' "s/^WAKE_START=.*/WAKE_START=0/; s/^WAKE_END=.*/WAKE_END=24/" "$GTG_CONF_DIR/plan.txt"
+rm -f "$GTG_STATE_DIR/last-nudge" "$GTG_STATE_DIR/paused"
+./bin/gtg off sick >/dev/null
+is "a paused fire says so"  "$(./bin/gtg-nudge 2>&1 | grep -c 'skip: paused until')" "1"
+is "  and logs no set"      "$(wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' ')" "0"
+is "  and burns no slot"    "$([ -f "$GTG_STATE_DIR/last-nudge" ] && echo yes || echo no)" "no"
+is "  and today says it"    "$(./bin/gtg today | grep -c '^nudges are off until')" "1"
+is "  and status says it"   "$(./bin/gtg status | grep -c '^paused: ')" "1"
+./bin/gtg on >/dev/null
+is "gtg on turns them back on" "$(./bin/gtg status | grep -c '^paused: ')" "0"
+is "  and a second gtg on is honest" "$(./bin/gtg on)" "nudges are already on"
+
+# Typed into a text field rather than run as a subcommand: the menu bar path.
+is "a typed line pauses too" "$(./bin/gtg 'not today' | grep -c '^nudges off until')" "1"
+is "  and wrote no set"      "$(wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' ')" "0"
+./bin/gtg on >/dev/null
+./bin/gtg off 2x >/dev/null 2>&1; is "a mistyped stretch is refused (rc 1)" "$?" "1"
+is "  and paused nothing" "$([ -f "$GTG_STATE_DIR/paused" ] && echo yes || echo no)" "no"
+is "3d reaches a later day" \
+  "$(./bin/gtg off 3d >/dev/null; date -r "$(cut -f1 "$GTG_STATE_DIR/paused")" '+%Y-%m-%d')" \
+  "$(date -v+3d '+%Y-%m-%d')"
+rm -f "$GTG_STATE_DIR/paused"
+
+# A day turned off on purpose is not a day of dialogs ignored, and counting
+# the two together would read as a collapse in compliance.
+D=$(date '+%Y-%m-%d')
+cat >"$GTG_STATE_DIR/nudge.log" <<N
+$D 09:20  paused until Thu 17 Sep 09:00 (sick)
+$D 09:50  skip: paused until Thu 17 Sep 09:00 (sick)
+$D 10:20  skip: paused until Thu 17 Sep 09:00 (sick)
+N
+is "fires counts a day off apart" "$(./bin/gtg fires | grep -c '2 turned off')" "1"
+is "  and shows no nudges at all" "$(./bin/gtg fires | grep -c '^last 14 days: 0 nudges shown')" "1"
+
+echo "== status: one call for the menu bar =="
+# The menu used to make three calls on every click and waited about a second
+# for them. This is the one call that replaced them, so it has to carry
+# everything the menu draws.
+reset_plan
+record_batch 'pull-ups x5' home >/dev/null
+out=$(./bin/gtg status)
+is "names where you are" "$(printf '%s' "$out" | grep -c '^where: \(home\|away\)$')" "1"
+is "carries the pick"    "$(printf '%s' "$out" | grep -c '^pick: [a-zA-Z]')" "1"
+is "and today's sets"    "$(printf '%s' "$out" | grep -c '1 set(s)')" "1"
+is "and one row per set" "$(printf '%s' "$out" | grep -cE '^  [0-9][0-9]:[0-9][0-9]  ')" "1"
+is "quiet when it is on" "$(printf '%s' "$out" | grep -c '^paused: ')" "0"
+
 echo "== today shows the spread across the day =="
 # Grease-the-groove lives on spread, so `today` says how many waking hours
 # got a set. A window of 0..24 keeps the test true at any hour of the day.
@@ -464,6 +578,119 @@ is "empty reps do not shift the columns" "$(sync_rows 1 | head -1 | cut -f1,3)" 
 is "weight rides along"                  "$(sync_rows 1 | sed -n 2p | cut -f1,3)" "kettlebell swings x10 @ 50 lb	away"
 is "skips are not synced"                "$(sync_rows 1 | wc -l | tr -d ' ')" "2"
 
+echo "== what each movement usually is =="
+reset_plan
+# The mode, not the last value: one mistyped row must not redefine a movement.
+# This is the exact shape of the 2026-09-22 entry that started all of this --
+# a timed back stretch hand-corrected into a row saying 30 reps.
+GTG_NEW=log record_batch 'kettlebell back stretch 30s' home >/dev/null 2>&1
+for _ in 1 2; do record_batch 'kettlebell back stretch 30s' home >/dev/null; done
+record_batch 'kettlebell back stretch x30' home >/dev/null
+for _ in 1 2; do record_batch 'ring dips x5' home >/dev/null; done
+record_batch 'ring dips x9' home >/dev/null
+is "a timed movement reads as timed" \
+  "$(movement_profiles | sed -n 's/^kettlebell back stretch - \([a-z]*\),.*/\1/p')" "timed"
+is "  at the duration seen most often" \
+  "$(movement_profiles | grep -c '^kettlebell back stretch - timed, usually 30s')" "1"
+is "a counted movement reads as counted" \
+  "$(movement_profiles | grep -c '^ring dips - counted, usually x5')" "1"
+is "  and carries its set count" \
+  "$(movement_profiles | sed -n 's/^ring dips .*(\([0-9]*\) sets)$/\1/p')" "3"
+is "a plan movement never done says so" \
+  "$(movement_profiles | grep -c '^push-ups - in the plan as:')" "1"
+
+echo "== reading a sentence, when the parser cannot =="
+reset_plan; stub_reset
+# The movement has to exist before a sentence can resolve TO it. It is in the
+# real plan; the suite's throwaway pool is deliberately smaller.
+GTG_NEW=log record_batch 'kettlebell back stretch 30s' home >/dev/null 2>&1
+
+# The line that started this, and the answer sonnet actually gave for it.
+STUB_ANSWER='kettlebell back stretch 30s' \
+  GTG_INTERPRET_CMD="$TMP/bin/stub" \
+  ./bin/gtg '30-second back stretch with kettlebell' >"$TMP/o" 2>"$TMP/e"
+is "a sentence the parser refuses is logged" "$?" "0"
+is "  under the right movement" "$(tail -1 "$GTG_STATE_DIR/log.tsv" | cut -f2)" \
+  "kettlebell back stretch"
+is "  as a DURATION, not a rep count" "$(tail -1 "$GTG_STATE_DIR/log.tsv" | cut -f6)" "30"
+is "  and the reading is said out loud" \
+  "$(grep -c '^read as: kettlebell back stretch 30s' "$TMP/e")" "1"
+is "  the model was asked once" "$(stub_calls)" "1"
+is "  and was told what the movement usually is" \
+  "$(grep -c 'kettlebell back stretch - timed' "$STUB_SAW")" "1"
+
+# Twice is once. Speech repeats itself, and the second answer is free.
+stub_reset
+STUB_ANSWER='kettlebell back stretch 30s' GTG_INTERPRET_CMD="$TMP/bin/stub" \
+  ./bin/gtg '30-second back stretch with kettlebell' >/dev/null 2>&1
+is "the same sentence again asks nobody" "$(stub_calls)" "0"
+
+# A movement it already understands never goes near a model.
+reset_plan; stub_reset
+STUB_ANSWER='ring dips x99' GTG_INTERPRET_CMD="$TMP/bin/stub" \
+  ./bin/gtg 'pull-ups x5' >/dev/null 2>&1
+is "a line the parser understands is not sent" "$(stub_calls)" "0"
+is "  and is logged as typed" "$(tail -1 "$GTG_STATE_DIR/log.tsv" | cut -f3)" "5"
+
+echo "== and when the reader is wrong, absent or broken =="
+# Every one of these must land on the SAME refusal the tool gave before any of
+# this existed. Failing open is the whole safety argument.
+reset_plan
+./bin/gtg 'sled push x5' >/dev/null 2>"$TMP/e"; is "no reader: refused as before" "$?" "1"
+is "  naming the movement" "$(grep -c '^unknown movement: sled push' "$TMP/e")" "1"
+
+reset_plan
+STUB_ANSWER='' GTG_INTERPRET_CMD="$TMP/bin/stub" \
+  ./bin/gtg 'sled push x5' >/dev/null 2>"$TMP/e"; is "an empty answer: refused" "$?" "1"
+is "  naming the movement" "$(grep -c '^unknown movement: sled push' "$TMP/e")" "1"
+
+# The one that bit for real: `claude -p` with no credential answers on STDOUT
+# and exits 0, so an error message arrived shaped like a movement name.
+reset_plan; rm -f "$GTG_STATE_DIR/nudge.log"
+STUB_ANSWER='Not logged in - Please run /login' GTG_INTERPRET_CMD="$TMP/bin/stub" \
+  ./bin/gtg 'sled push x5' >/dev/null 2>"$TMP/e"; is "prose: refused" "$?" "1"
+is "  and never offered as a movement" "$(grep -c 'Not logged in' "$TMP/e")" "0"
+is "  the original refusal stands" "$(grep -c '^unknown movement: sled push' "$TMP/e")" "1"
+is "  and the refusal is written down, not swallowed" \
+  "$(grep -c 'interpret: refused' "$GTG_STATE_DIR/nudge.log")" "1"
+
+reset_plan
+STUB_ANSWER='x5' GTG_INTERPRET_CMD="$TMP/bin/stub" \
+  ./bin/gtg 'sled push x5' >/dev/null 2>"$TMP/e"; is "a nameless answer: refused" "$?" "1"
+
+reset_plan
+GTG_INTERPRET_TIMEOUT=1 GTG_INTERPRET_CMD='sleep 20' \
+  ./bin/gtg 'sled push x5' >/dev/null 2>"$TMP/e"; is "a hang: refused, on time" "$?" "1"
+is "  naming the movement" "$(grep -c '^unknown movement: sled push' "$TMP/e")" "1"
+
+# An answer in the right SHAPE naming a movement nobody has: still refused,
+# because record_batch validates the model exactly as it validates a person.
+reset_plan
+STUB_ANSWER='sled push x5' GTG_INTERPRET_CMD="$TMP/bin/stub" \
+  ./bin/gtg 'shoved the sled five times' >/dev/null 2>"$TMP/e"
+is "an invented movement: still refused" "$?" "1"
+is "  named as the model read it" "$(grep -c '^unknown movement: sled push' "$TMP/e")" "1"
+is "  with the reading shown" "$(grep -c '^read as: sled push x5' "$TMP/e")" "1"
+is "  and nothing written" "$(rows)" "0"
+
+# INTERPRET=off means off.
+reset_plan; stub_reset
+printf 'INTERPRET=off\n' >>"$GTG_CONF_DIR/plan.txt"
+unset GTG_INTERPRET_CMD
+./bin/gtg 'sled push x5' >/dev/null 2>"$TMP/e"; is "INTERPRET=off: refused" "$?" "1"
+is "  and asked nobody" "$(stub_calls)" "0"
+export GTG_INTERPRET_CMD=/usr/bin/true
+
+# A spoken round still splits, backdates and takes "not today" for an answer,
+# because `gtg say` execs the ordinary path rather than repeating it.
+reset_plan
+STUB_ANSWER='@7:15 ring dips x5 ; pull-ups x5' GTG_INTERPRET_CMD="$TMP/bin/stub" \
+  ./bin/gtg 'at quarter past seven I did five ring dips and five pull ups' \
+  >"$TMP/o" 2>"$TMP/e"
+is "a spoken round lands as two rows" "$(rows)" "2"
+is "  backdated to the time said" \
+  "$(head -1 "$GTG_STATE_DIR/log.tsv" | cut -f1)" "$(date '+%Y-%m-%d')T07:15:00"
+
 echo "== every dialog compiles =="
 # Compiled, never shown: osacompile checks the syntax and opens nothing. The
 # add-a-movement prompt shipped with a syntax error and nobody saw it, because
@@ -489,7 +716,7 @@ echo "== readers run clean =="
 reset_plan
 record_batch 'pull-ups x5' home >/dev/null
 # `nudges` must survive an empty nudge log rather than erroring on it.
-for c in today week stats options plan nudges; do
+for c in today week stats options plan nudges status; do
   ./bin/gtg "$c" >/dev/null 2>&1 && ok "gtg $c" || bad "gtg $c" "nonzero" "0"
 done
 ./bin/gtg when 8am >/dev/null 2>&1 && ok "gtg when 8am" || bad "gtg when 8am" "nonzero" "0"

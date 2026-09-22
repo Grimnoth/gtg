@@ -42,10 +42,20 @@ if ! in_waking_window "$(date +%-H)"; then
   exit 0
 fi
 
-# --- 3. home vs away --------------------------------------------------------
+# --- 3. turned off on purpose -----------------------------------------------
+# A sick day, or any day the answer is already no. Said out loud, with an end
+# time, and it expires by itself -- see pause_active in gtg-lib.sh. The line
+# is logged like every other decision, and `gtg fires` counts these apart from
+# the nudges that were ignored: a quiet day chosen is not a day of refusals.
+if pause_active; then
+  note "skip: paused until $(pause_human "$PAUSE_UNTIL")${PAUSE_WHY:+ ($PAUSE_WHY)}"
+  exit 0
+fi
+
+# --- 4. home vs away --------------------------------------------------------
 where=$(where_am_i)
 
-# --- 4. meeting check -------------------------------------------------------
+# --- 5. meeting check -------------------------------------------------------
 # FAILS OPEN on purpose: a missing icalBuddy, a refused calendar grant, a bad
 # calendar name, or any error at all still nudges. A stray banner during a
 # meeting is a much cheaper failure than a reminder system that quietly stops.
@@ -135,7 +145,7 @@ if [ "$busy_now" = yes ]; then
   exit 0
 fi
 
-# --- 5. what to do ----------------------------------------------------------
+# --- 6. what to do ----------------------------------------------------------
 line=$(primary_option "$where")
 if [ "$starts_soon" = yes ]; then
   title="GTG - meeting soon"
@@ -148,7 +158,7 @@ else
   prompt="Time for a set. What did you do?"
 fi
 
-# --- 6. ask -----------------------------------------------------------------
+# --- 7. ask -----------------------------------------------------------------
 style=$(cfg STYLE); style=${style:-picker}
 sound=$(cfg SOUND); sound=${sound:-Ping}
 speak=$(cfg SPEAK)
@@ -327,6 +337,18 @@ or: $hint"
       esac
       line="$typed"
 
+      # "off", "not today", "sick": sometimes the honest answer to the nudge
+      # is that there will be no set today. It is taken HERE, in the box that
+      # is already open, because this is the moment the nuisance is felt --
+      # asking Ben to find a menu instead is how he learns to ignore the
+      # dialog rather than answer it. Unstamped, so nothing counts as done.
+      if parse_pause "$line"; then
+        if ! ends=$(pause_ends "$PAUSE_FOR"); then ends=$(pause_ends); fi
+        pause_set "$ends" "$PAUSE_REASON"
+        note "paused until $(pause_human "$ends")${PAUSE_REASON:+ ($PAUSE_REASON)}"
+        exit 0
+      fi
+
       # The same "@8am ..." prefix the CLI and the menu bar take, so one input
       # habit works everywhere -- you answer a nudge at ten having done the set
       # at seven, and it lands at seven.
@@ -358,17 +380,22 @@ or: $hint"
       # written -- a logged round is an answered nudge. Only a failure exits
       # early, unstamped, the same way every other failure here does, so the
       # next fire tries again rather than counting a rejection as done.
-      GTG_NEW=""; tab=$(printf '\t')
+      GTG_NEW=""; reading=""; tab=$(printf '\t')
       while :; do
         err=$(mktemp)
-        out=$(record_batch "$line" "$where" 2>"$err"); rc=$?
+        out=$(record_smart "$line" "$where" 2>"$err"); rc=$?
+        reading=$(sed -n 's/^read as: //p' "$err" | head -1)
         if [ "$rc" -eq 0 ]; then
           rm -f "$err"
           line=$(printf '%s' "$out" | paste -sd';' -)
-          note "logged${GTG_NEW:+ (new movement)}: $line"
+          note "logged${GTG_NEW:+ (new movement)}${reading:+ (read as: $reading)}: $line"
           break
         fi
         unknown=$(sed -n 's/^unknown movement: //p' "$err" | head -1); rm -f "$err"
+        # The box comes back holding the READING when there is one. A
+        # sentence the model turned into "sled push x5" is one word from being
+        # right; handing back the raw dictation makes it be retyped instead.
+        [ -n "$reading" ] && line="$reading"
         if [ "$rc" -ne 3 ]; then note "could not read that as a movement: $line"; exit 0; fi
         # Three different non-answers, three different lines. "declined" once
         # covered all of them, and for three weeks it was recording a prompt
@@ -393,6 +420,6 @@ or: $hint"
   esac
 fi
 
-# --- 7. stamp ---------------------------------------------------------------
+# --- 8. stamp ---------------------------------------------------------------
 printf '%s' "$now" >"$STAMP"
 note "nudged ($where): $line"
