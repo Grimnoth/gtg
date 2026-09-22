@@ -632,6 +632,28 @@ STUB_ANSWER='ring dips x99' GTG_INTERPRET_CMD="$TMP/bin/stub" \
 is "a line the parser understands is not sent" "$(stub_calls)" "0"
 is "  and is logged as typed" "$(tail -1 "$GTG_STATE_DIR/log.tsv" | cut -f3)" "5"
 
+echo "== the reader is found without a PATH =="
+# The one thing nobody tested first time, and it broke BOTH callers at once
+# while working perfectly from a terminal. launchd gives a job
+# PATH=/usr/bin:/bin:/usr/sbin:/sbin, and hs.task gives a Hammerspoon child
+# exactly the same four, so `command -v claude` found nothing in the nudge and
+# nothing in the menu bar. --which answers this without calling a model.
+reset_plan
+printf 'INTERPRET=claude\n' >>"$GTG_CONF_DIR/plan.txt"
+bare=$(env -u GTG_INTERPRET_CMD PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+       HOME="$REAL_HOME" GTG_STATE_DIR="$GTG_STATE_DIR" GTG_CONF_DIR="$GTG_CONF_DIR" \
+       ./bin/gtg-interpret --which 2>/dev/null)
+is "a reader is resolved with launchd's PATH" \
+  "$(printf '%s' "$bare" | grep -c '^/.*claude')" "1"
+is "  and it is an absolute path, not a bare name" \
+  "$(printf '%s' "${bare%% *}" | cut -c1)" "/"
+
+# A named reader that genuinely is not there says so, rather than going quiet.
+reset_plan; rm -f "$GTG_STATE_DIR/nudge.log"
+printf 'INTERPRET=nosuchreader\n' >>"$GTG_CONF_DIR/plan.txt"
+out=$(env -u GTG_INTERPRET_CMD ./bin/gtg-interpret <<<'sled push x5' 2>&1)
+is "an unknown reader name interprets nothing" "$out" ""
+
 echo "== and when the reader is wrong, absent or broken =="
 # Every one of these must land on the SAME refusal the tool gave before any of
 # this existed. Failing open is the whole safety argument.

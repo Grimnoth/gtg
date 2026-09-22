@@ -116,6 +116,26 @@ local function logText(text)
   return sh({ "--new", edited })
 end
 
+-- What to put on screen when it is over: the rows that landed, or the reason
+-- there are none. Never a bare "nothing heard" while the reason sits unread in
+-- stderr -- an alert that reports the wrong failure costs more than one that
+-- reports nothing, because it sends you looking in the wrong place.
+local function outcome(out, err)
+  local rows = trim(out)
+  if rows ~= "" then return rows end
+  local unknown = err:match("unknown movement: ([^\n]+)")
+  if unknown then return 'not a movement it knows:\n"' .. trim(unknown) .. '"' end
+  local why = ""
+  for line in trim(err):gmatch("[^\n]+") do
+    if not line:match("^listening") and not line:match("^installing")
+      and not line:match("^heard: ") and not line:match("^new%? log it") then
+      why = line
+    end
+  end
+  if why ~= "" then return why end
+  return "nothing heard"
+end
+
 -- SAY IT. One key, speak, done.
 --
 -- The lowest-friction path there is, and the whole reason the interpreter
@@ -135,24 +155,32 @@ local function sayIt()
   local ping = hs.sound.getByName("Ping")
   if ping then ping:play() end
 
+  -- BOTH callbacks accumulate.
+  --
+  -- hs.task hands streamed output to the STREAMING callback and then gives
+  -- the completion callback empty strings. Reading the result only at
+  -- completion therefore read nothing, and the alert said "nothing heard"
+  -- immediately after visibly having heard something -- while hiding the real
+  -- error, which was that the interpreter could not be found at all. One bug
+  -- concealing another is the expensive kind.
+  local got = { out = {}, err = {} }
+  local function keep(o, e)
+    if o and o ~= "" then got.out[#got.out + 1] = o end
+    if e and e ~= "" then got.err[#got.err + 1] = e end
+  end
+
   local t = hs.task.new(GTG, function(_, out, err)
+    keep(out, err)
     listening = false
     if box then hs.alert.closeSpecific(box) end
-    -- What LANDED, from stdout. The CLI's stderr carries progress, and on a
-    -- failure the reason, so it is shown only when nothing was logged.
-    local msg = trim(out or "")
-    if msg == "" then
-      for line in trim(err or ""):gmatch("[^\n]+") do
-        if not line:match("^listening") and not line:match("^installing") then msg = line end
-      end
-    end
-    hs.alert.show(msg ~= "" and msg or "nothing heard", 3)
+    hs.alert.show(outcome(table.concat(got.out), table.concat(got.err)), 4)
     refresh()
-  end, function(_, _, err)
-    -- Streaming, so the box stops claiming to listen once it has stopped. One
-    -- that still says "listening" while a model reads the line teaches you to
-    -- talk over it.
-    local heard = err and err:match("heard: ([^\n]+)")
+  end, function(_, out, err)
+    keep(out, err)
+    -- The box stops claiming to listen once it has stopped. One that still
+    -- says "listening" while a model reads the line teaches you to talk over
+    -- it.
+    local heard = table.concat(got.err):match("heard: ([^\n]+)")
     if heard and box then
       hs.alert.closeSpecific(box)
       box = hs.alert.show('"' .. heard .. '"', true)

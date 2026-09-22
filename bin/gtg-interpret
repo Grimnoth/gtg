@@ -25,9 +25,20 @@ CACHE="$STATE_DIR/interpreted.tsv"
 CACHE_KEEP=500
 MODEL_TIMEOUT="${GTG_INTERPRET_TIMEOUT:-25}"
 
-text=$(cat)
-text=$(printf '%s' "$text" | tr -d '\r' | head -1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-[ -n "$text" ] || exit 0
+# --which prints the reader this would run, and exits. It exists so the suite
+# can check that the binary is found WITHOUT a stripped PATH, and without
+# calling a model to find out. The caller's PATH was the one thing nobody
+# thought to test, and it broke the nudge and the menu bar together.
+WHICH=""
+[ "${1:-}" = --which ] && WHICH=1
+
+if [ -n "$WHICH" ]; then
+  text="--which"
+else
+  text=$(cat)
+  text=$(printf '%s' "$text" | tr -d '\r' | head -1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  [ -n "$text" ] || exit 0
+fi
 
 # The cache key ignores case, punctuation and spacing, so "10 ring dips" and
 # "10 Ring Dips." are one question. Speech repeats itself far more than typing
@@ -35,7 +46,7 @@ text=$(printf '%s' "$text" | tr -d '\r' | head -1 | sed 's/^[[:space:]]*//; s/[[
 key=$(printf '%s' "$text" | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' ' ' | sed 's/^ *//; s/ *$//')
 [ -n "$key" ] || exit 0
 
-if [ -s "$CACHE" ]; then
+if [ -z "$WHICH" ] && [ -s "$CACHE" ]; then
   hit=$(awk -F'\t' -v k="$key" '$1 == k { r = $2 } END { if (r != "") print r }' "$CACHE")
   if [ -n "${hit:-}" ]; then printf '%s\n' "$hit"; exit 0; fi
 fi
@@ -56,18 +67,50 @@ read -r engine model <<EOF
 $engine
 EOF
 
+# Where a reader actually lives, WITHOUT trusting the caller's PATH.
+#
+# Neither of the two callers that matter has a useful one. launchd gives a job
+# PATH=/usr/bin:/bin:/usr/sbin:/sbin unless the plist says otherwise, and
+# hs.task gives a Hammerspoon child exactly the same four. So `command -v
+# claude` found nothing from the nudge AND from the menu bar, and the
+# interpreter did nothing at all in both -- while working perfectly from a
+# terminal, which is the only place it was first tried.
+#
+# Fixed here rather than by adding a PATH to the plist, because the plist
+# would fix one caller and leave the menu bar, the hotkey and the next caller
+# broken in the same way.
+find_reader() {
+  local n="$1" p
+  for p in "$(command -v "$n" 2>/dev/null || true)" \
+           "$HOME/.local/bin/$n" "/opt/homebrew/bin/$n" "/usr/local/bin/$n" \
+           "$HOME/.bun/bin/$n" "$HOME/bin/$n"; do
+    [ -n "$p" ] && [ -x "$p" ] && { printf '%s' "$p"; return 0; }
+  done
+  return 1
+}
+
+# A reader that is NAMED and missing is worth a line. Silence here is how a
+# tool degrades for a month without anyone noticing, which is the failure this
+# whole file exists to argue against.
+missing() {
+  note "interpret: INTERPRET=$1 but no $1 binary was found" >>"$NUDGE_LOG" 2>/dev/null || true
+  exit 0
+}
+
 if [ -n "${GTG_INTERPRET_CMD:-}" ]; then
   set -- ${GTG_INTERPRET_CMD}
 else
   case "$engine" in
     off|no|none|"") exit 0 ;;
-    codex) command -v codex >/dev/null 2>&1 || exit 0
-           set -- codex exec --skip-git-repo-check -s read-only - ;;
-    claude) command -v claude >/dev/null 2>&1 || exit 0
-            set -- claude -p --model "${model:-sonnet}" ;;
+    codex) reader=$(find_reader codex) || missing codex
+           set -- "$reader" exec --skip-git-repo-check -s read-only - ;;
+    claude) reader=$(find_reader claude) || missing claude
+            set -- "$reader" -p --model "${model:-sonnet}" ;;
     *) exit 0 ;;
   esac
 fi
+
+[ -n "$WHICH" ] && { printf '%s\n' "$*"; exit 0; }
 
 # --- the prompt --------------------------------------------------------------
 # A QUOTED heredoc for the fixed text and printf for everything else. Nothing
