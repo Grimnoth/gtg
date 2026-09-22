@@ -1,0 +1,51 @@
+#!/bin/bash
+# ./ship "what changed"
+#
+# The whole loop, in one word: test, commit, push, deploy.
+#
+# It exists because "push my change" was never really one step here. The
+# working tree IS the running tool -- launchd and the menu bar both execute
+# files in bin/ directly -- but hammerspoon/gtg.lua is a COPY, deployed by
+# install.sh. So editing the menu bar and pushing left the pushed version and
+# the running version disagreeing, silently, until the next reload. Forgetting
+# that step is not a mistake worth making twice, so it is not a step any more.
+#
+# Tests run FIRST and a failure stops everything. Nothing reaches GitHub, and
+# nothing reaches the running tool, on a red suite.
+set -eu
+cd "$(dirname "$0")"
+
+if [ $# -eq 0 ]; then
+  echo "usage: ./ship \"what changed\"" >&2
+  exit 1
+fi
+
+if git diff --quiet && git diff --cached --quiet && [ -z "$(git status --porcelain)" ]; then
+  echo "nothing changed."
+  exit 0
+fi
+
+echo "== tests =="
+if ! out=$(./test/run.sh 2>&1); then
+  printf '%s\n' "$out" | tail -20
+  echo
+  echo "STOPPED: tests failed. Nothing committed, pushed or deployed." >&2
+  exit 1
+fi
+printf '%s\n' "$out" | tail -1
+
+echo
+echo "== commit and push =="
+git add -A
+git commit -q -m "$*"
+git push -q
+echo "pushed:  $(git log --oneline -1)"
+
+echo
+echo "== deploy to this Mac =="
+# Idempotent, and the only thing that moves gtg.lua into ~/.hammerspoon and
+# rebuilds bin/gtg-listen when its source changed.
+./install.sh | grep -vE '^(kept|linked|home) ' || true
+
+echo
+echo "Done. Running here, and public at https://github.com/Grimnoth/gtg"
