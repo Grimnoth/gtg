@@ -112,11 +112,13 @@ if not gtgOk then hs.printf("gtg.lua failed to load: %s", tostring(gtgErr)) end
 LUA
     echo "added    load line to $HS_DIR/init.lua"
   fi
-  # hs.reload() tears down the port this CLI is waiting on for a reply, so
-  # called directly it hangs install.sh, and ./ship with it (ten minutes on
-  # 2026-09-23 before it was killed). Scheduling the reload lets the command
-  # return first; the reload lands 0.2s later.
-  command -v hs >/dev/null 2>&1 && hs -c 'hs.timer.doAfter(0.2, hs.reload)' >/dev/null 2>&1 || true
+  # </dev/null: when stdin is a pipe, hs runs -c and then keeps reading stdin
+  # for more commands until the pipe closes. Under anything that pipes
+  # ./ship (an agent, a script) that is never, and install.sh hung for ten
+  # minutes on 2026-09-23. Even `hs -c 'return 1'` does it. Scheduling the
+  # reload lets the command return before the port it talks to goes away,
+  # so it exits 0 rather than 69.
+  command -v hs >/dev/null 2>&1 && hs -c 'hs.timer.doAfter(0.2, hs.reload)' </dev/null >/dev/null 2>&1 || true
 else
   echo "skipped  menu bar (Hammerspoon not installed)"
 fi
