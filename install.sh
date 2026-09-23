@@ -74,6 +74,17 @@ echo "linked   $SHIM"
 # --- launchd ----------------------------------------------------------------
 sed "s|__HOME__|$HOME|g" "$REPO/launchd/$LABEL.plist" >"$PLIST"
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+# bootout returns at once, but a job with a live process (an open nudge
+# dialog) stays registered until launchd has killed it, up to its 20s exit
+# timeout. A bootstrap inside that window fails with "5: Input/output error",
+# and the job is simply gone: no nudges, nothing in the log. That is how a
+# ./ship at 11:20 on 2026-09-22 silenced every nudge after it. Measured with a
+# throwaway job before trusting this: registered for 5s of a 5s timeout, then
+# the bootstrap went through.
+for _ in $(seq 1 30); do
+  launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || break
+  sleep 1
+done
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 echo "loaded   $LABEL (fires at :20 and :50)"
 

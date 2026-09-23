@@ -45,7 +45,15 @@ echo
 echo "== deploy to this Mac =="
 # Idempotent, and the only thing that moves gtg.lua into ~/.hammerspoon and
 # rebuilds bin/gtg-listen when its source changed.
-./install.sh | grep -vE '^(kept|linked|home) ' || true
+# A failed install used to vanish into this pipe's `|| true` while the line
+# below said "Done", and the nudges stopped with nothing to say so.
+if ! out=$(./install.sh 2>&1); then
+  printf '%s\n' "$out"
+  echo
+  echo "STOPPED: pushed, but the deploy failed. Nothing new is running. Re-run ./install.sh." >&2
+  exit 1
+fi
+printf '%s\n' "$out" | grep -vE '^(kept|linked|home) ' || true
 
 echo
 echo "Done. Running here, and public at https://github.com/Grimnoth/gtg"
