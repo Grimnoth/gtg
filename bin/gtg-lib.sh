@@ -15,6 +15,10 @@ PAUSE="$STATE_DIR/paused"
 # Rows the hub has not accepted yet. The local log is a mirror, written at
 # the same moment, so a menu read does not wait on the network.
 OUTBOX="$STATE_DIR/outbox.tsv"
+# The rows one flush is sending. Only a flush touches it, so the outbox is
+# never rewritten while record() appends to it.
+SPOOL="$STATE_DIR/outbox.sending"
+QUEUE_LOCK="$STATE_DIR/outbox.lock"
 # `off` / `on` the hub has not confirmed. hub_pull retries it before it
 # mirrors the hub's pause, or a failed forward would be wiped on the next pull.
 PAUSE_PENDING="$STATE_DIR/pause.pending"
@@ -551,7 +555,7 @@ record() {
   printf '%s\n' "$row" >>"$LOG"
   hub=$(cfg HUB)
   if [ -n "$hub" ]; then
-    printf '%s\n' "$row" >>"$OUTBOX"
+    /usr/bin/lockf -k "$QUEUE_LOCK" sh -c 'printf "%s\n" "$1" >>"$2"' _ "$row" "$OUTBOX"
     # The hub owns the calendar. Writing it here as well would put the set
     # on the calendar twice, once now and once when ingest lands.
     # Backgrounded the same way as the calendar write below: record() runs
@@ -664,36 +668,38 @@ hub_send() {
 # Do not call hub_flush from here: the lock is already held, and -t 0 would
 # treat that as "someone else is flushing" and send nothing.
 hub_flush_once() {
-  local hub path snap n
+  local hub path
   hub=$(cfg HUB)
   [ -n "$hub" ] || return 0
-  [ -s "$OUTBOX" ] || return 0
+  unsent || return 0
   path=$(cfg HUB_GTG)
   path=${path:-src/personal/gtg/bin/gtg}
-  snap=$(mktemp "$STATE_DIR/.outbox.XXXXXX")
-  cp "$OUTBOX" "$snap" || { rm -f "$snap"; return 1; }
-  n=$(wc -l <"$snap" | tr -d ' ')
-  if hub_ssh "$hub" "$(printf '%q' "$path") ingest" <"$snap"; then
-    # Drop only the lines this send carried. A row appended while ssh was in
-    # flight is still in the outbox, and the next flush delivers it.
-    tail -n +"$((n + 1))" "$OUTBOX" >"$snap.rest" && mv "$snap.rest" "$OUTBOX"
-    rm -f "$snap"
+  # Move the outbox into the spool under the lock record() appends under, so
+  # a set recorded mid-flush lands either in the spool or in the next outbox,
+  # never in a file being replaced. A spool left by a failed send is kept and
+  # grows; resending it is safe because ingest skips an exact line.
+  /usr/bin/lockf -k "$QUEUE_LOCK" sh -c \
+    'if [ -s "$1" ]; then cat "$1" >>"$2" && : >"$1"; fi' _ "$OUTBOX" "$SPOOL" \
+    || return 1
+  if hub_ssh "$hub" "$(printf '%q' "$path") ingest" <"$SPOOL"; then
+    rm -f "$SPOOL"
     return 0
   fi
   note "hub flush failed for $hub" >>"$NUDGE_LOG"
-  rm -f "$snap" "$snap.rest"
   return 1
 }
+
+# True while any row has not reached the hub.
+unsent() { [ -s "$OUTBOX" ] || [ -s "$SPOOL" ]; }
 
 hub_flush() {
   local rc
   [ -n "$(cfg HUB)" ] || return 0
-  [ -s "$OUTBOX" ] || return 0
-  # ponytail: lockf -t 0 so a second flush gives up instead of queueing. Two
-  # flushes trimming the outbox by line count would drop a row that arrived
-  # between them. A duplicate send is harmless (ingest skips an exact line);
-  # the one that lost the lock leaves the outbox for the next record, pull or
-  # `gtg flush`. Ceiling: no queue. Upgrade: one long-lived drainer.
+  unsent || return 0
+  # ponytail: lockf -t 0 so a second flush gives up instead of queueing; the
+  # spool has one owner at a time. The one that lost the lock leaves its rows
+  # for the next record, pull or `gtg flush`. Ceiling: no queue. Upgrade: one
+  # long-lived drainer.
   export GTG_STATE_DIR="$STATE_DIR" GTG_CONF_DIR="$CONF_DIR"
   [ -n "${GTG_SSH:-}" ] && export GTG_SSH
   /usr/bin/lockf -t 0 "$STATE_DIR/flush.lock" \
@@ -766,7 +772,7 @@ hub_pull() {
   # Silence the remote "ingested N" line. status and the nudge both call
   # this, and the menu bar reads status as its own little format.
   hub_flush >/dev/null 2>&1 || true
-  if [ -s "$OUTBOX" ]; then
+  if unsent; then
     skip_log=1
     note "hub pull skipped: outbox still has unsent rows" >>"$NUDGE_LOG"
     PULL_NOTE="outbox not empty; mirror kept"

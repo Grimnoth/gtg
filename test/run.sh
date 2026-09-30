@@ -873,6 +873,11 @@ done
 shift # host
 printf '%s\n' "$*" >>"$GTG_SSH_LOG"
 [ "${GTG_SSH_FAIL:-}" = 1 ] && exit 1
+# A set recorded on the laptop while this send is in flight.
+if [ -n "${GTG_SSH_DURING:-}" ]; then
+  during=$GTG_SSH_DURING
+  (unset GTG_SSH_DURING; bash -c "$during")
+fi
 export GTG_STATE_DIR="$GTG_HUB_STATE" GTG_CONF_DIR="$GTG_HUB_CONF"
 export GTG_NO_CALENDAR=1 GTG_NO_PAGE=1
 # If the hub side thinks it is a client, this is the fail-loud ssh, not a network.
@@ -922,7 +927,7 @@ reset_client() {
   reset_plan
   printf 'HUB=mini\nHUB_GTG=%s\n' "$REPO/bin/gtg" >>"$GTG_CONF_DIR/plan.txt"
   : >"$GTG_STATE_DIR/log.tsv"
-  rm -f "$GTG_STATE_DIR/outbox.tsv" "$GTG_STATE_DIR/paused" \
+  rm -f "$GTG_STATE_DIR/outbox.tsv" "$GTG_STATE_DIR/outbox.sending" "$GTG_STATE_DIR/paused" \
         "$GTG_STATE_DIR/pause.pending" "$GTG_STATE_DIR/nudge.log" "$GTG_SSH_LOG"
   mkdir -p "$GTG_HUB_STATE" "$GTG_HUB_CONF"
   cat >"$GTG_HUB_CONF/plan.txt" <<'P'
@@ -932,14 +937,15 @@ every: pull-ups x5 | push-ups x20 | ring dips x5 | farmer walk 1 min
 P
   : >"$GTG_HUB_STATE/log.tsv"
   rm -f "$GTG_HUB_STATE/paused"
-  unset GTG_SSH_FAIL GTG_RSYNC_FAIL
+  unset GTG_SSH_FAIL GTG_RSYNC_FAIL GTG_SSH_DURING
 }
+queued() { cat "$GTG_STATE_DIR/outbox.tsv" "$GTG_STATE_DIR/outbox.sending" 2>/dev/null; }
 # Background flush: the nudge must not wait on ssh, so record() returns before
 # the outbox is necessarily empty. Give it a moment, then fail loud.
 outbox_clear() {
   local i=0
   while [ "$i" -lt 80 ]; do
-    [ ! -s "$GTG_STATE_DIR/outbox.tsv" ] && return 0
+    [ -z "$(queued)" ] && return 0
     sleep 0.05
     i=$((i + 1))
   done
@@ -983,7 +989,7 @@ export GTG_SSH_FAIL=1
 ./bin/gtg 'pull-ups x5' >/dev/null
 noted 'hub flush failed'
 is "a failed flush keeps the row" \
-  "$(awk -F'\t' '{print $2}' "$GTG_STATE_DIR/outbox.tsv")" "pull-ups"
+  "$(queued | awk -F'\t' '{print $2}')" "pull-ups"
 is "  in the mirror too" "$(awk -F'\t' '{print $2}' "$GTG_STATE_DIR/log.tsv")" "pull-ups"
 is "  and not on the hub yet" "$(wc -l <"$GTG_HUB_STATE/log.tsv" | tr -d ' ')" "0"
 is "  and says so in the nudge log" \
@@ -993,8 +999,18 @@ unset GTG_SSH_FAIL
 is "a later flush delivers it" \
   "$(awk -F'\t' '{print $2}' "$GTG_HUB_STATE/log.tsv")" "pull-ups"
 is "  exactly once" "$(wc -l <"$GTG_HUB_STATE/log.tsv" | tr -d ' ')" "1"
-is "  and clears the outbox" \
-  "$([ -s "$GTG_STATE_DIR/outbox.tsv" ] && echo full || echo empty)" "empty"
+is "  and clears the outbox" "$(queued)" ""
+
+# A set recorded while a flush is on the wire must survive that flush.
+reset_client
+printf '2026-09-30T08:00:00\tpull-ups\t5\thome\t\t\n' >"$GTG_STATE_DIR/outbox.tsv"
+export GTG_SSH_DURING="cd '$REPO' && . bin/gtg-lib.sh && GTG_NO_PAGE=1 GTG_AT=2026-09-30T08:05:00 record ring-dips 5 home"
+./bin/gtg flush >/dev/null
+unset GTG_SSH_DURING
+is "a set recorded mid-flush is still queued" "$(queued | awk -F'\t' '{print $2}')" "ring-dips"
+./bin/gtg flush >/dev/null
+is "  and the next flush delivers both, once each" \
+  "$(awk -F'\t' '{print $2}' "$GTG_HUB_STATE/log.tsv" | paste -sd, -)" "pull-ups,ring-dips"
 
 # Pull must not replace the mirror while an unsent row would be thrown away.
 reset_client
@@ -1004,7 +1020,7 @@ printf 'hub-copy\n' >"$GTG_HUB_STATE/log.tsv"
 out=$(./bin/gtg pull 2>"$TMP/e")
 is "pull with a full outbox keeps the mirror" "$(cat "$GTG_STATE_DIR/log.tsv")" "local-only"
 is "  and says why" "$(printf '%s' "$out" | grep -c 'outbox')" "1"
-: >"$GTG_STATE_DIR/outbox.tsv"
+rm -f "$GTG_STATE_DIR/outbox.tsv" "$GTG_STATE_DIR/outbox.sending"
 ./bin/gtg pull >/dev/null
 is "pull with an empty outbox takes the hub log" "$(cat "$GTG_STATE_DIR/log.tsv")" "hub-copy"
 

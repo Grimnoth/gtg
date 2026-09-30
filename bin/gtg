@@ -489,8 +489,8 @@ case "${1:-done}" in
       echo "flush failed; rows kept in the outbox" >&2
       exit 1
     fi
-    if [ -s "$OUTBOX" ]; then
-      echo "outbox still has $(wc -l <"$OUTBOX" | tr -d ' ') row(s)"
+    if unsent; then
+      echo "outbox still has $(cat "$OUTBOX" "$SPOOL" 2>/dev/null | wc -l | tr -d ' ') row(s)"
     else
       echo "outbox empty"
     fi
