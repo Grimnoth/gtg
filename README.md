@@ -309,9 +309,11 @@ routes and the text to send are in `docs/agent.md`.
 
 ## Where the nudge goes
 
-One ping per waking hour, delivered where you actually are. The laptop when a
-key or the mouse moved in the last three minutes. The phone, through the bot,
-when they did not. Never two pings for the same hour.
+One ping per waking hour, delivered where you actually are. The laptop when
+you are home and a key or the mouse moved in the last three minutes. The
+phone, through the bot, otherwise, including every hour you are away from
+home, even at the keyboard: working remote, a dialog is an interruption.
+Never two pings for the same hour.
 
 The hour is a slot, `YYYY-MM-DDTHH`, owned by the hub in
 `~/.local/state/gtg/slots.tsv`. The first decision sticks. The one exception

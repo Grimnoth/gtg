@@ -222,7 +222,7 @@ OWNERS = ("laptop", "phone", "handoff", "skip")
 
 
 def slot_route(slot, now, laptop_idle_s, set_logged_this_hour, paused,
-               in_waking_window, idle_present=180):
+               in_waking_window, idle_present=180, laptop_where=None):
     """Where an unclaimed slot goes. First match wins.
 
     slot and now are the caller's key and clock. The booleans are already
@@ -242,6 +242,11 @@ def slot_route(slot, now, laptop_idle_s, set_logged_this_hour, paused,
         present = 180
     if present < 1:
         present = 180
+    # Away from home the phone is the channel even at the keyboard: a dialog
+    # on a laptop Ben is working remote on is an interruption, not a nudge.
+    # No where at all (an older client) keeps the idle rule.
+    if laptop_where == "away":
+        return "phone"
     if laptop_idle_s is not None and laptop_idle_s < present:
         return "laptop"
     return "phone"
@@ -692,7 +697,7 @@ def perform_route(idle, meeting, client_where=None):
     decision = slot_route(
         slot, time.strftime("%Y-%m-%dT%H:%M:%S"), idle,
         set_logged_this_hour(slot), _read_paused(), _hour_in_window(),
-        _idle_present(),
+        _idle_present(), client_where,
     )
     meet = _meet(meeting)
     if decision.startswith("skip:"):
