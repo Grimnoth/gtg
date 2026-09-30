@@ -2098,13 +2098,22 @@ answered_how() {
 route_plan
 printf 'HUB=mini\n' >>"$GTG_CONF_DIR/plan.txt"
 route_clear
-rm -f "$GTG_CONF_DIR/home-gateway-mac"
+printf '00:00:00:00:00:00\n' >"$GTG_CONF_DIR/home-gateway-mac"
 : >"$TMP/dialog-n"
 export GTG_DIALOG=snooze IDLE_A=0 IDLE_B=0
 out=$(./bin/gtg-nudge 2>&1)
 is "away and at the keyboard: no dialog" "$(dialog_n)" "0"
 is "  the phone gets the hour" "$(wh_n)" "1"
 is "  and the nudge log says so" "$(printf '%s\n' "$out" | grep -c 'routed: phone')" "1"
+
+# No home list is unknown, not away: the idle rule keeps the laptop.
+route_clear
+rm -f "$GTG_CONF_DIR/home-gateway-mac"
+: >"$TMP/dialog-n"
+out=$(./bin/gtg-nudge 2>&1)
+is "no home list and at the keyboard: the dialog shows" "$(dialog_n)" "1"
+is "  the phone hears nothing" "$(wh_n)" "0"
+is "  and the slot records no where" "$(grep -c 'where=' "$GTG_STATE_DIR/slots.tsv")" "0"
 printf '%s\n' "$(current_gateway_mac || true)" >"$GTG_CONF_DIR/home-gateway-mac"
 
 route_plan
