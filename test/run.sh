@@ -1832,6 +1832,19 @@ route_clear() {
   printf '200' >"$TMP/wh-status"
 }
 wh_n() { if [ -s "$TMP/wh.jsonl" ]; then wc -l <"$TMP/wh.jsonl" | tr -d ' '; else echo 0; fi; }
+wh_field() { # index key — one field of one webhook body
+  /usr/bin/python3 -c 'import json,os,sys
+if not os.path.isfile(sys.argv[1]):
+    print("")
+    raise SystemExit(0)
+lines=[ln for ln in open(sys.argv[1]) if ln.strip()]
+if int(sys.argv[2]) >= len(lines):
+    print("")
+    raise SystemExit(0)
+body=json.loads(json.loads(lines[int(sys.argv[2])])["body"])
+v=body.get(sys.argv[3])
+print("" if v is None else v)' "$TMP/wh.jsonl" "$1" "$2"
+}
 jget() { # json-text key
   printf '%s' "$1" | /usr/bin/python3 -c 'import json,sys
 d=json.load(sys.stdin)
@@ -1933,6 +1946,19 @@ resp=$(post_handoff '{"meeting":false}')
 is "a set logged during the dialog blocks the handoff" "$(jget "$resp" route)" "laptop"
 is "  sent is false" "$(jget "$resp" sent)" "false"
 is "  and no webhook" "$(wh_n)" "0"
+# log_end is the file size at the claim, so it is the start of the next row.
+# A prior row makes that offset non-zero: the discard used to eat exactly the
+# first row appended after it, which is this backdated set.
+route_clear
+printf '2020-01-01T08:00:00\tpull-ups\t5\taway\t\t\n' >>"$GTG_STATE_DIR/log.tsv"
+resp=$(post_route '{"device":"laptop","idle":0}')
+off=$(slot_of | cut -f2 | sed -n 's/.*log_end=\([0-9]*\).*/\1/p')
+is "a prior row leaves a non-zero claim offset" "$([ "${off:-0}" -gt 0 ] && echo yes)" "yes"
+printf '2020-01-01T07:30:00\tpull-ups\t5\taway\t\t\n' >>"$GTG_STATE_DIR/log.tsv"
+resp=$(post_handoff '{"meeting":false}')
+is "a backdated set as the first row after the claim blocks the handoff" "$(jget "$resp" route)" "laptop"
+is "  sent is false" "$(jget "$resp" sent)" "false"
+is "  and sends nothing" "$(wh_n)" "0"
 route_clear
 resp=$(post_route '{"device":"laptop","idle":9999}')
 is "phone owner before the handoff attempt" "$(jget "$resp" route)" "phone"
@@ -1972,6 +1998,30 @@ is "the webhook key is not in the hub log" \
 printf '%s\n%s\n' "http://127.0.0.1:${wh_port}/hook" "wh-test-key" >"$GTG_CONF_DIR/grok-webhook"
 chmod 600 "$GTG_CONF_DIR/grok-webhook"
 
+# The hub machine is home. A laptop that says away must win, including the pick.
+mac=$(current_gateway_mac || true)
+printf '%s\n' "$mac" >"$GTG_CONF_DIR/home-gateway-mac"
+is "listing the gateway makes the hub home" "$(where_am_i)" "home"
+away_pick=$(primary_option away 2>/dev/null)
+route_clear
+resp=$(post_route '{"device":"laptop","idle":9999,"where":"away"}')
+is "laptop idle reports where=away" "$(wh_field 0 where)" "away"
+is "  and the pick is the away preselect" "$(wh_field 0 pick)" "$away_pick"
+is "  the slot records where" "$(slot_of | cut -f2 | grep -c 'where=away')" "1"
+route_clear
+day=$(date '+%Y-%m-%d')
+if [ "$(date '+%H')" = "23" ]; then other="${day}T00"; else other="${day}T23"; fi
+printf '%s\t%s\tlaptop\tmeeting=0;where=away\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$other" \
+  >>"$GTG_STATE_DIR/slots.tsv"
+resp=$(post_route '{"device":"hub"}')
+is "a same-day laptop where=away is where the hub phones" "$(wh_field 0 where)" "away"
+is "  and the pick follows it" "$(wh_field 0 pick)" "$away_pick"
+route_clear
+resp=$(post_route '{"device":"hub"}')
+is "no laptop where falls back to the hub" "$(wh_field 0 where)" "$(where_am_i)"
+is "  and the pick follows the hub" "$(wh_field 0 pick)" "$(primary_option "$(where_am_i)" 2>/dev/null)"
+rm -f "$GTG_CONF_DIR/home-gateway-mac"
+
 route_clear
 out=$(GTG_ROUTE_URL="http://127.0.0.1:$route_port/api/route" ./bin/gtg-route 2>&1)
 is "the scheduler sends an unclaimed hour to the phone" "$(printf '%s\n' "$out" | grep -c 'routed: phone')" "1"
@@ -1994,6 +2044,7 @@ n=$((n + 1))
 printf '%s' "$n" >"$GTG_DIALOG_N"
 case "${GTG_DIALOG:-snooze}" in
   timeout) sleep "${GTG_DIALOG_SLEEP:-0}"; printf '__TIMEOUT__' ;;
+  empty) ;;
   did) printf 'Did it' ;;
   off)
     if [ "$n" -eq 1 ]; then printf 'Other...'; else printf 'off'; fi ;;
@@ -2057,6 +2108,7 @@ is "idle: no dialog" "$(dialog_n)" "0"
 is "  routed to the phone" "$(printf '%s\n' "$out" | grep -c 'routed: phone')" "1"
 is "  unstamped" "$(stamp_set)" "no"
 is "  one webhook" "$(wh_n)" "1"
+is "  the laptop reported its where" "$(slot_of | cut -f2 | grep -c "where=$(where_am_i)")" "1"
 
 route_clear
 : >"$TMP/dialog-n"
@@ -2143,6 +2195,119 @@ is "off records answered" "$(answered_how)" "off"
 is "  and does not stamp" "$(stamp_set)" "no"
 is "  the pause is on" "$([ -s "$GTG_STATE_DIR/paused" ] && echo yes || echo no)" "yes"
 
+# First /api/route is answered by the real hub, then the reply is dropped.
+# The retry must see the phone owner and send nothing else.
+cat >"$TMP/drop-route.py" <<'PY'
+import socket, sys, threading
+upstream = int(sys.argv[1])
+port_path = sys.argv[2]
+drop_left = [1]
+lock = threading.Lock()
+
+def content_length(header):
+    for line in header.split(b"\r\n"):
+        if line.lower().startswith(b"content-length:"):
+            try:
+                return int(line.split(b":", 1)[1].strip())
+            except ValueError:
+                return 0
+    return 0
+
+def read_http(sock, buf):
+    while b"\r\n\r\n" not in buf:
+        chunk = sock.recv(4096)
+        if not chunk:
+            return buf
+        buf += chunk
+    header, body = buf.split(b"\r\n\r\n", 1)
+    n = content_length(header)
+    while len(body) < n:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        body += chunk
+    return header + b"\r\n\r\n" + body[:n]
+
+def handle(client):
+    try:
+        client.settimeout(30)
+        req = read_http(client, b"")
+        if b"\r\n\r\n" not in req:
+            return
+        line = req.split(b"\r\n", 1)[0]
+        parts = line.split(b" ")
+        drop = False
+        if len(parts) >= 2 and parts[0] == b"POST" and parts[1] == b"/api/route":
+            with lock:
+                if drop_left[0] > 0:
+                    drop_left[0] -= 1
+                    drop = True
+        up = socket.create_connection(("127.0.0.1", upstream), timeout=30)
+        try:
+            up.sendall(req)
+            resp = read_http(up, b"")
+        finally:
+            up.close()
+        if drop:
+            return
+        client.sendall(resp)
+    except Exception:
+        pass
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+srv = socket.socket()
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", 0))
+srv.listen(16)
+fh = open(port_path, "w")
+fh.write(str(srv.getsockname()[1]))
+fh.close()
+while True:
+    c, _ = srv.accept()
+    threading.Thread(target=handle, args=(c,), daemon=True).start()
+PY
+rm -f "$TMP/drop-port"
+/usr/bin/python3 "$TMP/drop-route.py" "$route_port" "$TMP/drop-port" \
+  >"$TMP/drop.out" 2>"$TMP/drop.err" &
+drop_pid=$!
+drop_port=""
+i=0
+while [ "$i" -lt 50 ]; do
+  if [ -s "$TMP/drop-port" ]; then drop_port=$(cat "$TMP/drop-port"); break; fi
+  i=$((i + 1)); sleep 0.05
+done
+is "drop proxy is up" "$([ -n "$drop_port" ] && echo yes || echo no)" "yes"
+route_clear
+: >"$TMP/dialog-n"
+sed -i '' "s|^HUB_URL=.*|HUB_URL=http://127.0.0.1:$drop_port|" "$GTG_CONF_DIR/plan.txt"
+export GTG_DIALOG=snooze IDLE_A=99999
+posts_before=$(grep -c -F '"POST /api/route HTTP/1.1"' "$TMP/route-server.err" || true)
+out=$(./bin/gtg-nudge 2>&1)
+posts_after=$(grep -c -F '"POST /api/route HTTP/1.1"' "$TMP/route-server.err" || true)
+is "a dropped route reply shows no dialog" "$(dialog_n)" "0"
+is "  the retry is the phone" "$(printf '%s\n' "$out" | grep -c 'routed: phone')" "1"
+is "  and does not fail open" "$(printf '%s\n' "$out" | grep -c 'hub unreachable')" "0"
+is "  the hub saw both posts" "$((posts_after - posts_before))" "2"
+is "  and sent one webhook" "$(wh_n)" "1"
+sed -i '' "s|^HUB_URL=.*|HUB_URL=http://127.0.0.1:$route_port|" "$GTG_CONF_DIR/plan.txt"
+kill "$drop_pid" 2>/dev/null || true
+wait "$drop_pid" 2>/dev/null || true
+drop_pid=""
+
+route_clear
+: >"$TMP/dialog-n"
+export GTG_DIALOG=empty IDLE_A=0 IDLE_B=30
+rc=0
+out=$(./bin/gtg-nudge 2>&1) || rc=$?
+is "a dialog that does not display exits 1" "$rc" "1"
+is "  and says so" "$(printf '%s\n' "$out" | grep -c 'ERROR: dialog did not display')" "1"
+is "  and phones that slot once" "$(wh_n)" "1"
+is "  for this hour" "$(wh_field 0 slot)" "$(date '+%Y-%m-%dT%H')"
+
 is "route tests never called ssh or rsync" \
   "$([ -s "$GTG_SSH_LEAK" ] && echo leak || echo clean)" "clean"
 
@@ -2155,6 +2320,11 @@ if [ -n "${wh_pid:-}" ]; then
   kill "$wh_pid" 2>/dev/null || true
   wait "$wh_pid" 2>/dev/null || true
   wh_pid=""
+fi
+if [ -n "${drop_pid:-}" ]; then
+  kill "$drop_pid" 2>/dev/null || true
+  wait "$drop_pid" 2>/dev/null || true
+  drop_pid=""
 fi
 PATH=$route_path
 unset GTG_OSASCRIPT GTG_IDLE_CMD GTG_DIALOG GTG_DIALOG_LOG GTG_DIALOG_SCRIPT GTG_DIALOG_N

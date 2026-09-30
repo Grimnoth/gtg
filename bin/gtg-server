@@ -370,9 +370,9 @@ def _non_skip_since(offset):
     except OSError:
         return False
     with fh:
+        # log_end is the file size at claim time, so it is the first byte of
+        # the next row. Discarding a line here drops that row.
         fh.seek(offset)
-        if offset:
-            fh.readline()
         for line in fh:
             if _is_set_row(line.rstrip("\n").split("\t")):
                 return True
@@ -493,20 +493,35 @@ def progress_line(slot=None):
     return "%d %s, %d reps, hours %s done" % (sets, word, reps, _compact_hours(hours))
 
 
-def _nudge_context():
+def _nudge_context(where=None):
     # where_am_i and primary_option, not `gtg status`. status pulls from the
     # hub when HUB= is set, and a route must not ssh. Three seconds: a hung
     # gateway lookup must not outlive the client's 25s and also send.
-    script = (
-        '. "$1"\n'
-        'where=$(where_am_i)\n'
-        'pick=$(primary_option "$where")\n'
-        "printf '%s\\n' \"$where\"\n"
-        "printf '%s\\n' \"$pick\"\n"
-    )
+    # A caller that already knows home or away must not ask where_am_i: on
+    # the hub that answer is always home.
+    if where in ("home", "away"):
+        script = (
+            '. "$1"\n'
+            'pick=$(primary_option "$2")\n'
+            "printf '%s\\n' \"$2\"\n"
+            "printf '%s\\n' \"$pick\"\n"
+        )
+        cmd = ["bash", "-c", script, "gtg-context",
+               os.path.join(HERE, "gtg-lib.sh"), where]
+    else:
+        script = (
+            '. "$1"\n'
+            'where=$(where_am_i)\n'
+            'pick=$(primary_option "$where")\n'
+            "printf '%s\\n' \"$where\"\n"
+            "printf '%s\\n' \"$pick\"\n"
+        )
+        cmd = ["bash", "-c", script, "gtg-context",
+               os.path.join(HERE, "gtg-lib.sh")]
+        where = None
     try:
         proc = subprocess.run(
-            ["bash", "-c", script, "gtg-context", os.path.join(HERE, "gtg-lib.sh")],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=os.environ.copy(),
@@ -514,17 +529,66 @@ def _nudge_context():
             timeout=3,
         )
     except (subprocess.TimeoutExpired, OSError):
-        return "away", "do a quick set"
+        return where or "away", "do a quick set"
     if proc.returncode != 0:
-        return "away", "do a quick set"
+        return where or "away", "do a quick set"
     lines = (proc.stdout or "").splitlines()
-    where = lines[0].strip() if lines else ""
+    got = lines[0].strip() if lines else ""
     pick = lines[1].strip() if len(lines) > 1 else ""
-    if where not in ("home", "away"):
-        where = "away"
+    if got not in ("home", "away"):
+        got = where or "away"
     if not pick:
         pick = "do a quick set"
-    return where, pick
+    return got, pick
+
+
+def _with_where(detail, client_where):
+    if client_where in ("home", "away"):
+        return "%s;where=%s" % (detail, client_where)
+    return detail
+
+
+def _reported_where(slot):
+    # Last where= on today's rows. A hub-only row does not write one, so a
+    # fallback to where_am_i is not replayed as a laptop report.
+    day = (slot or "")[:10]
+    if len(day) != 10:
+        return None
+    found = None
+    try:
+        fh = open(_slots_path(), "r", encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    with fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 4 or not parts[1].startswith(day):
+                continue
+            for piece in parts[3].split(";"):
+                if not piece.startswith("where="):
+                    continue
+                val = piece[len("where="):]
+                if val in ("home", "away"):
+                    found = val
+    return found
+
+
+def _channel_context(client_where, slot):
+    if client_where in ("home", "away"):
+        return _nudge_context(client_where)
+    prior = _reported_where(slot)
+    if prior:
+        return _nudge_context(prior)
+    return _nudge_context()
+
+
+def _posted_where(body):
+    if "where" not in body or body.get("where") is None:
+        return None
+    where = body.get("where")
+    if where in ("home", "away"):
+        return where
+    return False
 
 
 def _webhook_creds():
@@ -581,15 +645,15 @@ def _post_webhook(url, key, payload):
     return None
 
 
-def _send_channel(event, slot, meeting):
+def _send_channel(event, slot, meeting, client_where=None):
     meet = _meet(meeting)
     creds = _webhook_creds()
     if creds is None:
-        _append_slot(slot, "skip", "no-webhook;meeting=%s" % meet)
+        _append_slot(slot, "skip", _with_where("no-webhook;meeting=%s" % meet, client_where))
         _hub_note("ERROR: no grok-webhook file; %s not sent (no-webhook)" % event)
         return "skip:no-webhook"
     url, key = creds
-    where, pick = _nudge_context()
+    where, pick = _channel_context(client_where, slot)
     payload = {
         "pick": pick,
         "where": where,
@@ -598,14 +662,14 @@ def _send_channel(event, slot, meeting):
     }
     status = _post_webhook(url, key, payload)
     if status is None:
-        _append_slot(slot, event, "meeting=%s" % meet)
+        _append_slot(slot, event, _with_where("meeting=%s" % meet, client_where))
         return event
     # ponytail: one attempt, then the hour is owned as phone even though the
     # POST failed. A second ping is worse than a missed one. Ceiling: a crash
     # after a successful POST and before this append can send again on the
     # next route. Upgrade: append the phone row first and treat that row as
     # already sent.
-    _append_slot(slot, "phone", "webhook-failed:%s" % status)
+    _append_slot(slot, "phone", _with_where("webhook-failed:%s" % status, client_where))
     _hub_note("ERROR: webhook failed for %s: status %s" % (slot, status))
     return "phone"
 
@@ -620,7 +684,7 @@ def _handoff_blocked(slot, detail):
     return set_logged_this_hour(slot)
 
 
-def perform_route(idle, meeting):
+def perform_route(idle, meeting, client_where=None):
     slot = _slot_now()
     owner, detail = _slot_owner(slot)
     if owner:
@@ -633,15 +697,18 @@ def perform_route(idle, meeting):
     meet = _meet(meeting)
     if decision.startswith("skip:"):
         reason = decision.split(":", 1)[1]
-        _append_slot(slot, "skip", "%s;meeting=%s" % (reason, meet))
+        _append_slot(slot, "skip", _with_where("%s;meeting=%s" % (reason, meet), client_where))
         return decision, slot
     if decision == "laptop":
-        _append_slot(slot, "laptop", "meeting=%s;log_end=%d" % (meet, _log_size()))
+        _append_slot(
+            slot, "laptop",
+            _with_where("meeting=%s;log_end=%d" % (meet, _log_size()), client_where),
+        )
         return "laptop", slot
-    return _send_channel("phone", slot, meeting), slot
+    return _send_channel("phone", slot, meeting, client_where), slot
 
 
-def perform_handoff(meeting, slot=None):
+def perform_handoff(meeting, slot=None, client_where=None):
     if not _slot_key_ok(slot):
         slot = _slot_now()
     owner, detail = _slot_owner(slot)
@@ -649,7 +716,7 @@ def perform_handoff(meeting, slot=None):
         return _owner_route(owner, detail), slot, False
     if _handoff_blocked(slot, detail):
         return "laptop", slot, False
-    route = _send_channel("handoff", slot, meeting)
+    route = _send_channel("handoff", slot, meeting, client_where)
     return route, slot, route == "handoff"
 
 
@@ -680,6 +747,9 @@ def api_route(query, body):
     device = body.get("device")
     if device not in ("laptop", "hub"):
         return 400, {"ok": False, "output": "", "error": "device must be laptop or hub"}
+    client_where = _posted_where(body)
+    if client_where is False:
+        return 400, {"ok": False, "output": "", "error": "where must be home or away"}
     idle = None
     if device == "laptop" and "idle" in body and body.get("idle") is not None:
         idle = decimal(body.get("idle"))
@@ -687,16 +757,19 @@ def api_route(query, body):
             return 400, {"ok": False, "output": "", "error": "idle must be a number"}
     meeting = body.get("meeting") is True
     with WRITE_LOCK:
-        route, slot = perform_route(idle, meeting)
+        route, slot = perform_route(idle, meeting, client_where)
     return _route_body(route, slot)
 
 
 def api_route_handoff(query, body):
     body = as_dict(body)
+    client_where = _posted_where(body)
+    if client_where is False:
+        return 400, {"ok": False, "output": "", "error": "where must be home or away"}
     meeting = body.get("meeting") is True
     slot = body.get("slot") if isinstance(body.get("slot"), str) else None
     with WRITE_LOCK:
-        route, slot, sent = perform_handoff(meeting, slot)
+        route, slot, sent = perform_handoff(meeting, slot, client_where)
     return _route_body(route, slot, sent)
 
 
