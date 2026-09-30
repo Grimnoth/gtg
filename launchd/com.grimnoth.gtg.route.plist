@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.grimnoth.gtg.route</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/src/personal/gtg/bin/gtg-route</string>
+  </array>
+
+  <!-- Same wildcard shape as the nudge: every hour at :22 and :52, two
+       minutes after the laptop's :20 and :50. An hour the laptop has not
+       claimed by then goes to the phone. -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Minute</key><integer>22</integer></dict>
+    <dict><key>Minute</key><integer>52</integer></dict>
+  </array>
+
+  <!-- No RunAtLoad: a login is not a slot. -->
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.local/state/gtg/nudge.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.local/state/gtg/nudge.log</string>
+</dict>
+</plist>

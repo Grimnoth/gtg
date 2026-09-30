@@ -470,6 +470,36 @@ case "${1:-done}" in
         }
         print ""; print l1; print l2; print l3
       }' "$NUDGE_LOG"
+    # Per-channel counts from the hub's slot log. No file: today's output,
+    # unchanged. An empty file still prints the zeroes.
+    if [ -f "$STATE_DIR/slots.tsv" ]; then
+      awk -F'\t' -v since="$since" '
+        function pct(n, d) { return d ? int(n * 100 / d + 0.5) : 0 }
+        NF < 3 || substr($2, 1, 10) < since { next }
+        $3 == "answered" { ans[$2] = 1; next }
+        $3 == "laptop" || $3 == "phone" || $3 == "handoff" || $3 == "skip" {
+          own[$2] = $3
+          why[$2] = $4
+        }
+        END {
+          for (s in own) {
+            if (own[s] == "skip") {
+              split(why[s], p, ";")
+              sk[p[1]]++
+            } else {
+              n[own[s]]++
+              if (ans[s]) a[own[s]]++
+            }
+          }
+          printf "  channels: laptop %d (answered %d, %d%%), phone %d (answered %d, %d%%), handoff %d (answered %d, %d%%)\n",
+            n["laptop"]+0, a["laptop"]+0, pct(a["laptop"]+0, n["laptop"]+0),
+            n["phone"]+0, a["phone"]+0, pct(a["phone"]+0, n["phone"]+0),
+            n["handoff"]+0, a["handoff"]+0, pct(a["handoff"]+0, n["handoff"]+0)
+          printf "  channel skips: done %d, paused %d, asleep-hours %d, no-webhook %d\n",
+            sk["done"]+0, sk["paused"]+0, sk["asleep-hours"]+0, sk["no-webhook"]+0
+        }
+      ' "$STATE_DIR/slots.tsv"
+    fi
     ;;
 
   today) today_report ;;

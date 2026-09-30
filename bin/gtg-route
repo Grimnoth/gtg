@@ -1,0 +1,34 @@
+#!/bin/bash
+# Hub scheduler. launchd fires this at :22 and :52. An hour nobody has claimed
+# goes to the phone.
+#
+# Does not write slots.tsv. The server does, under the same lock a laptop
+# POST takes. A second writer would double-ping. HTTP rather than doing the
+# routing here: see hub_http_post.
+set -u
+
+. "$(dirname "$0")/gtg-lib.sh"
+
+url=${GTG_ROUTE_URL:-http://127.0.0.1:${GTG_PORT:-8796}/api/route}
+rc=0
+resp=$(hub_http_post "$url" '{"device":"hub"}') || rc=$?
+if [ "$rc" -eq 2 ]; then
+  note "ERROR: route job: no token at $CONF_DIR/token"
+  exit 1
+fi
+if [ "$rc" -ne 0 ] || [ -z "$resp" ]; then
+  note "ERROR: route job: hub server did not answer"
+  exit 1
+fi
+route=$(printf '%s' "$resp" | /usr/bin/python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("route") or "")
+except Exception:
+    print("")')
+case "$route" in
+  phone)          note "routed: phone" ;;
+  skip:*)         note "routed: skip (${route#skip:})" ;;
+  laptop|handoff) note "routed: $route" ;;
+  "")             note "ERROR: route job: hub server did not answer"; exit 1 ;;
+  *)              note "ERROR: route job: no decision ($route)"; exit 1 ;;
+esac

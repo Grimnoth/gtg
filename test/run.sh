@@ -537,6 +537,25 @@ is "catch-ups counted"       "$(printf '%s\n' "$fires" | grep -c 'catch-up: 1 sh
 # that names a window counts; "no meeting window" and an hs failure do not.
 is "call window cross-tab"   "$(printf '%s\n' "$fires" | grep -c 'with a call window open: 1 shown, 0 logged')" "1"
 is "by hour: 11 shows two"   "$(printf '%s\n' "$fires" | awk '/^  hour/{for(i=2;i<=NF;i++)if($i=="11")c=i} /^  shown/{print $c}')" "2"
+is "no channel line without a slot file" "$(printf '%s\n' "$fires" | grep -c 'channels')" "0"
+{
+  printf '%sT00:00:00\t%sT10\tlaptop\tmeeting=0;log_end=0\n' "$D" "$D"
+  printf '%sT00:00:01\t%sT10\tanswered\tlog\n' "$D" "$D"
+  printf '%sT00:00:02\t%sT11\tphone\tmeeting=0\n' "$D" "$D"
+  printf '%sT00:00:03\t%sT12\tlaptop\tmeeting=0;log_end=0\n' "$D" "$D"
+  printf '%sT00:00:04\t%sT12\thandoff\tmeeting=0\n' "$D" "$D"
+  printf '%sT00:00:05\t%sT12\tanswered\tsnooze\n' "$D" "$D"
+  printf '%sT00:00:06\t%sT13\tskip\tdone;meeting=0\n' "$D" "$D"
+  printf '%sT00:00:07\t%sT14\tskip\tpaused;meeting=0\n' "$D" "$D"
+  printf '%sT00:00:08\t%sT15\tskip\tasleep-hours;meeting=0\n' "$D" "$D"
+  printf '%sT00:00:09\t%sT16\tskip\tno-webhook;meeting=0\n' "$D" "$D"
+  printf '2000-01-01T00:00:00\t2000-01-01T10\tphone\tmeeting=0\n'
+} >"$GTG_STATE_DIR/slots.tsv"
+fires=$(./bin/gtg fires 14)
+is "channel counts" "$(printf '%s\n' "$fires" | grep -F -c 'channels: laptop 1 (answered 1, 100%), phone 1 (answered 0, 0%), handoff 1 (answered 1, 100%)')" "1"
+is "channel skips" "$(printf '%s\n' "$fires" | grep -F -c 'channel skips: done 1, paused 1, asleep-hours 1, no-webhook 1')" "1"
+is "the old tally survives the channel lines" "$(printf '%s\n' "$fires" | grep -c '4 nudges shown')" "1"
+rm -f "$GTG_STATE_DIR/slots.tsv"
 
 # `gtg note` is how the menu bar records a catch-up into the same log the
 # nudges use, so `fires` sees both in one place.
@@ -1114,6 +1133,14 @@ cleanup_suite() {
     kill "$stub_pid" 2>/dev/null || true
     wait "$stub_pid" 2>/dev/null || true
   fi
+  if [ -n "${route_srv_pid:-}" ]; then
+    kill "$route_srv_pid" 2>/dev/null || true
+    wait "$route_srv_pid" 2>/dev/null || true
+  fi
+  if [ -n "${wh_pid:-}" ]; then
+    kill "$wh_pid" 2>/dev/null || true
+    wait "$wh_pid" 2>/dev/null || true
+  fi
   rm -rf "$TMP"
 }
 trap cleanup_suite EXIT
@@ -1229,8 +1256,9 @@ from zoneinfo import ZoneInfo
 import sys
 iso, which = sys.argv[1], sys.argv[2]
 start = datetime.strptime(iso, "%Y-%m-%dT%H:%M:%S").replace(second=0, microsecond=0)
-start = start.replace(tzinfo=ZoneInfo("America/New_York"))
-# Same exclusive-bound adjustment as minute_bounds in bin/gtg-gcal.
+start = start.replace(tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
+# Same exclusive-bound adjustment as minute_bounds in bin/gtg-gcal,
+# including the UTC conversion (local math mis-orders the spring-forward gap).
 begin = start - timedelta(seconds=1)
 end = start + timedelta(seconds=60)
 print(begin.isoformat() if which == "min" else end.isoformat())
@@ -1636,6 +1664,504 @@ if [ -n "${stub_pid:-}" ]; then
 fi
 unset GTG_GCAL_API GTG_GCAL_ID GTG_GCAL_LOG GTG_GCAL_CONTROL GTG_GCAL_PORT GTG_GCAL_PUB GTG_GCAL_ISS TMPDIR
 if [ "$had_tz" -eq 1 ]; then export TZ="$old_tz"; else unset TZ; fi
+reset_plan
+
+echo "== where the nudge goes =="
+# The minute lives in the plist. This script routes whatever hour it is asked
+# about; launchd is what makes that :22 and :52.
+is "route job fires at :22" "$(grep -c '<integer>22</integer>' launchd/com.grimnoth.gtg.route.plist)" "1"
+is "  and at :52" "$(grep -c '<integer>52</integer>' launchd/com.grimnoth.gtg.route.plist)" "1"
+is "install.sh hub loads it" "$(grep -c 'load_agent com.grimnoth.gtg.route' install.sh)" "1"
+is "install.sh does not copy the token" "$(grep -E -c 'cp .*token|scp .*token' install.sh || true)" "0"
+is "  and says how to copy it once" "$(grep -F -c 'cat ~/.config/gtg/token' install.sh)" "1"
+
+# Decision table, the hour-09/hour-19 trap, and the progress line. No server.
+unit=$(/usr/bin/python3 - "$REPO/bin/gtg-server" "$GTG_STATE_DIR/log.tsv" <<'PY'
+import sys, importlib.machinery, importlib.util
+loader = importlib.machinery.SourceFileLoader("gtg_server", sys.argv[1])
+spec = importlib.util.spec_from_loader("gtg_server", loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+def route(idle, done, paused, window, present):
+    idle_v = None if idle == "none" else int(idle)
+    return m.slot_route("2026-09-30T10", "2026-09-30T10:20:00", idle_v,
+                        done == "1", paused == "1", window == "1", int(present))
+print("present " + route("30", "0", "0", "1", "180"))
+print("boundary " + route("180", "0", "0", "1", "180"))
+print("inside " + route("179", "0", "0", "1", "180"))
+print("none " + route("none", "0", "0", "1", "180"))
+print("done " + route("0", "1", "1", "0", "180"))
+print("paused " + route("0", "0", "1", "0", "180"))
+print("asleep " + route("0", "0", "0", "0", "180"))
+print("tight-phone " + route("30", "0", "0", "1", "10"))
+print("tight-laptop " + route("5", "0", "0", "1", "10"))
+print("bad-present " + route("30", "0", "0", "1", "0"))
+log = sys.argv[2]
+def write(rows):
+    fh = open(log, "w")
+    fh.write("".join(rows))
+    fh.close()
+write([
+    "2026-01-01T09:30:00\tpull-ups\t5\taway\t\t\n",
+    "2026-01-01T19:00:00\tpull-ups\t4\taway\t\t\n",
+    "2026-01-01T09:10:00\tpush-ups\tskip\taway\t\t\n",
+])
+print("hour09 " + ("yes" if m.set_logged_this_hour("2026-01-01T09") else "no"))
+print("hour19 " + ("yes" if m.set_logged_this_hour("2026-01-01T19") else "no"))
+print("hour08 " + ("yes" if m.set_logged_this_hour("2026-01-01T08") else "no"))
+write(["2026-01-01T09:10:00\tpush-ups\tskip\taway\t\t\n"])
+print("skip-only " + ("yes" if m.set_logged_this_hour("2026-01-01T09") else "no"))
+write([
+    "2026-01-02T09:00:00\tpull-ups\t5\taway\t\t\n",
+    "2026-01-02T10:00:00\tpull-ups\t5\taway\t\t\n",
+    "2026-01-02T11:00:00\tpull-ups\t3\taway\t\t\n",
+    "2026-01-02T12:00:00\tpull-ups\t3\taway\t\t\n",
+    "2026-01-02T13:00:00\tpull-ups\tskip\taway\t\t\n",
+])
+print("progress " + m.progress_line("2026-01-02T10"))
+write([
+    "2026-01-03T09:00:00\tpull-ups\t1\taway\t\t\n",
+    "2026-01-03T14:00:00\tpull-ups\t1\taway\t\t\n",
+])
+print("gap " + m.progress_line("2026-01-03T09"))
+write(["2026-01-03T09:00:00\tpull-ups\t5\taway\t\t\n"])
+print("one " + m.progress_line("2026-01-03T09"))
+write([])
+print("empty " + m.progress_line("2026-01-03T09"))
+PY
+)
+u() { printf '%s\n' "$unit" | awk -v k="$1" '$1==k { sub(/^[^ ]+ /,""); print }'; }
+is "present routes to the laptop" "$(u present)" "laptop"
+is "idle at the boundary routes to the phone" "$(u boundary)" "phone"
+is "one second inside stays on the laptop" "$(u inside)" "laptop"
+is "no laptop report routes to the phone" "$(u none)" "phone"
+is "a logged set beats pause and the window" "$(u done)" "skip:done"
+is "paused beats the window" "$(u paused)" "skip:paused"
+is "outside the window skips" "$(u asleep)" "skip:asleep-hours"
+is "IDLE_PRESENT sends 30s idle to the phone" "$(u tight-phone)" "phone"
+is "  and 5s stays" "$(u tight-laptop)" "laptop"
+is "a bad IDLE_PRESENT falls back to 180" "$(u bad-present)" "laptop"
+is "hour 09 does not eat hour 19" "$(u hour09)" "yes"
+is "  hour 19 is its own hour" "$(u hour19)" "yes"
+is "  and hour 08 had no set" "$(u hour08)" "no"
+is "a skip is not a set" "$(u skip-only)" "no"
+is "progress compacts the hours" "$(u progress)" "4 sets, 16 reps, hours 09-12 done"
+is "  a gap stays a gap" "$(u gap)" "2 sets, 2 reps, hours 09 14 done"
+is "  one set is singular" "$(u one)" "1 set, 5 reps, hours 09 done"
+is "  nothing logged is zero" "$(u empty)" "0 sets, 0 reps, hours none done"
+: >"$GTG_STATE_DIR/log.tsv"
+
+# Local webhook and a local hub. Nothing here leaves the machine.
+cat >"$TMP/wh-server.py" <<'PY'
+import json, sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+log_path, status_path, port_path = sys.argv[1:]
+class H(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        return
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or "0")
+        body = self.rfile.read(n) if n else b""
+        rec = {
+            "authorization": self.headers.get("Authorization"),
+            "x_automation_key": self.headers.get("X-Automation-Key"),
+            "content_type": self.headers.get("Content-Type") or "",
+            "body": body.decode("utf-8", "replace"),
+        }
+        fh = open(log_path, "a")
+        fh.write(json.dumps(rec) + "\n")
+        fh.close()
+        try:
+            code = int(open(status_path).read().strip() or "200")
+        except Exception:
+            code = 200
+        raw = b"{}"
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+fh = open(port_path, "w")
+fh.write(str(srv.server_address[1]))
+fh.close()
+srv.serve_forever()
+PY
+printf '200\n' >"$TMP/wh-status"
+: >"$TMP/wh.jsonl"
+wh_pid=""
+route_srv_pid=""
+/usr/bin/python3 "$TMP/wh-server.py" "$TMP/wh.jsonl" "$TMP/wh-status" "$TMP/wh-port" \
+  >"$TMP/wh.out" 2>"$TMP/wh.err" &
+wh_pid=$!
+wh_port=""
+i=0
+while [ "$i" -lt 50 ]; do
+  if [ -s "$TMP/wh-port" ]; then wh_port=$(cat "$TMP/wh-port"); break; fi
+  i=$((i + 1)); sleep 0.05
+done
+is "webhook stub is up" "$([ -n "$wh_port" ] && echo yes || echo no)" "yes"
+printf '%s\n%s\n' "http://127.0.0.1:${wh_port}/hook" "wh-test-key" >"$GTG_CONF_DIR/grok-webhook"
+chmod 600 "$GTG_CONF_DIR/grok-webhook"
+printf '%s\n' 'route-test-token' >"$GTG_CONF_DIR/token"
+chmod 600 "$GTG_CONF_DIR/token"
+route_port=$(/usr/bin/python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+GTG_PORT="$route_port" GTG_NO_CALENDAR=1 GTG_NO_PAGE=1 \
+  /usr/bin/python3 "$REPO/bin/gtg-server" >"$TMP/route-server.out" 2>"$TMP/route-server.err" &
+route_srv_pid=$!
+ready=0
+i=0
+while [ "$i" -lt 50 ]; do
+  if grep -q 'listening' "$TMP/route-server.err"; then ready=1; break; fi
+  if ! kill -0 "$route_srv_pid" 2>/dev/null; then break; fi
+  i=$((i + 1)); sleep 0.05
+done
+is "route server started" "$ready" "1"
+
+route_plan() {
+  reset_plan
+  sed -i '' 's/^WAKE_START=.*/WAKE_START=0/; s/^WAKE_END=.*/WAKE_END=24/' "$GTG_CONF_DIR/plan.txt"
+  printf 'SOUND=off\nHUB_URL=http://127.0.0.1:%s\n' "$route_port" >>"$GTG_CONF_DIR/plan.txt"
+}
+route_clear() {
+  rm -f "$GTG_STATE_DIR/slots.tsv" "$GTG_STATE_DIR/paused" "$GTG_STATE_DIR/last-nudge" \
+        "$GTG_STATE_DIR/nudge.log" "$GTG_STATE_DIR/nudge.lock" "$GTG_STATE_DIR/outbox.tsv" \
+        "$TMP/wh.jsonl" "$TMP/dialog-log" "$TMP/dialog-script"
+  : >"$GTG_STATE_DIR/log.tsv"
+  printf '0' >"$TMP/idle-n"
+  printf '200' >"$TMP/wh-status"
+}
+wh_n() { if [ -s "$TMP/wh.jsonl" ]; then wc -l <"$TMP/wh.jsonl" | tr -d ' '; else echo 0; fi; }
+jget() { # json-text key
+  printf '%s' "$1" | /usr/bin/python3 -c 'import json,sys
+d=json.load(sys.stdin)
+v=d.get(sys.argv[1])
+if v is True: print("true")
+elif v is False: print("false")
+elif v is None: print("")
+else: print(v)' "$2"
+}
+post_route() { hub_http_post "http://127.0.0.1:$route_port/api/route" "$1"; }
+post_handoff() { hub_http_post "http://127.0.0.1:$route_port/api/route/handoff" "$1"; }
+post_answered() { hub_http_post "http://127.0.0.1:$route_port/api/route/answered" "$1"; }
+slot_of() {
+  awk -F'\t' -v s="$(date '+%Y-%m-%dT%H')" '
+    $2==s && ($3=="laptop"||$3=="phone"||$3=="handoff"||$3=="skip") { o=$3; d=$4 }
+    END { printf "%s\t%s", o, d }
+  ' "$GTG_STATE_DIR/slots.tsv" 2>/dev/null || true
+}
+route_plan
+route_clear
+
+resp=$(post_route '{"device":"laptop","idle":0,"meeting":false}')
+is "present claims the laptop" "$(jget "$resp" route)" "laptop"
+is "  and sends nothing" "$(wh_n)" "0"
+is "  meeting flag is recorded" "$(slot_of | cut -f2 | grep -c 'meeting=0')" "1"
+route_clear
+resp=$(post_route '{"device":"laptop","idle":0,"meeting":true}')
+is "a meeting does not skip a present laptop" "$(jget "$resp" route)" "laptop"
+is "  and the flag is kept" "$(slot_of | cut -f2 | grep -c 'meeting=1')" "1"
+is "  still no webhook" "$(wh_n)" "0"
+route_clear
+resp=$(post_route '{"device":"laptop","idle":9999}')
+is "idle claims the phone" "$(jget "$resp" route)" "phone"
+is "  one webhook" "$(wh_n)" "1"
+is "  the slot key is this hour" "$(jget "$resp" slot)" "$(date '+%Y-%m-%dT%H')"
+auth_ok=$(/usr/bin/python3 -c '
+import json,sys
+rec=json.loads(open(sys.argv[1]).readline())
+key=open(sys.argv[2]).read().splitlines()[1].strip()
+body=json.loads(rec["body"])
+ok = rec.get("authorization")=="Bearer "+key and rec.get("x_automation_key")==key
+ok = ok and rec.get("content_type","").startswith("application/json")
+ok = ok and all(body.get(k) for k in ("pick","where","progress","slot"))
+print("yes" if ok else "no")
+' "$TMP/wh.jsonl" "$GTG_CONF_DIR/grok-webhook")
+is "webhook carries both auth headers and the body fields" "$auth_ok" "yes"
+want_pick=$(where_am_i >/dev/null; primary_option "$(where_am_i)")
+got_pick=$(/usr/bin/python3 -c 'import json,sys; print(json.loads(json.loads(open(sys.argv[1]).readline())["body"])["pick"])' "$TMP/wh.jsonl")
+is "  the pick is the nudge preselect" "$got_pick" "$want_pick"
+got_prog=$(/usr/bin/python3 -c 'import json,sys; print(json.loads(json.loads(open(sys.argv[1]).readline())["body"])["progress"])' "$TMP/wh.jsonl")
+is "  progress is the empty hour" "$got_prog" "0 sets, 0 reps, hours none done"
+resp2=$(post_route '{"device":"laptop","idle":0}')
+is "a second route returns the phone owner" "$(jget "$resp2" route)" "phone"
+is "  and does not send again" "$(wh_n)" "1"
+route_clear
+resp=$(post_route '{"device":"laptop","idle":0}')
+is "a fresh hour is the laptop again" "$(jget "$resp" route)" "laptop"
+resp2=$(post_route '{"device":"hub"}')
+is "the hub job does not steal a laptop hour" "$(jget "$resp2" route)" "laptop"
+is "  and still sends nothing" "$(wh_n)" "0"
+route_clear
+printf '%s\tpull-ups\t5\taway\t\t\n' "$(date '+%Y-%m-%dT%H:%M:%S')" >>"$GTG_STATE_DIR/log.tsv"
+resp=$(post_route '{"device":"laptop","idle":0}')
+is "a set this hour skips" "$(jget "$resp" route)" "skip:done"
+is "  with no webhook" "$(wh_n)" "0"
+route_clear
+printf '%s\tsick\n' "$(( $(date +%s) + 3600 ))" >"$GTG_STATE_DIR/paused"
+resp=$(post_route '{"device":"hub"}')
+is "a pause skips" "$(jget "$resp" route)" "skip:paused"
+is "  with no webhook" "$(wh_n)" "0"
+rm -f "$GTG_STATE_DIR/paused"
+route_clear
+w=$(( ($(date +%-H) + 1) % 24 ))
+sed -i '' "s/^WAKE_START=.*/WAKE_START=$w/; s/^WAKE_END=.*/WAKE_END=$((w + 1))/" "$GTG_CONF_DIR/plan.txt"
+resp=$(post_route '{"device":"hub"}')
+is "outside the window skips" "$(jget "$resp" route)" "skip:asleep-hours"
+is "  with no webhook" "$(wh_n)" "0"
+route_plan
+route_clear
+printf 'IDLE_PRESENT=10\n' >>"$GTG_CONF_DIR/plan.txt"
+resp=$(post_route '{"device":"laptop","idle":30}')
+is "the plan's idle limit is what the hub uses" "$(jget "$resp" route)" "phone"
+route_clear
+resp=$(post_route '{"device":"laptop","idle":5}')
+is "  under that limit stays the laptop" "$(jget "$resp" route)" "laptop"
+sed -i '' '/^IDLE_PRESENT=/d' "$GTG_CONF_DIR/plan.txt"
+
+route_clear
+resp=$(post_route '{"device":"laptop","idle":0}')
+is "handoff starts from a laptop claim" "$(jget "$resp" route)" "laptop"
+resp=$(post_handoff '{"meeting":false}')
+is "an untouched laptop hour hands off" "$(jget "$resp" route)" "handoff"
+is "  and says it sent" "$(jget "$resp" sent)" "true"
+is "  exactly one webhook" "$(wh_n)" "1"
+route_clear
+resp=$(post_route '{"device":"laptop","idle":0}')
+printf '%s\tpull-ups\t5\taway\t\t\n' "$(date '+%Y-%m-%dT%H:%M:%S')" >>"$GTG_STATE_DIR/log.tsv"
+resp=$(post_handoff '{"meeting":false}')
+is "a set logged during the dialog blocks the handoff" "$(jget "$resp" route)" "laptop"
+is "  sent is false" "$(jget "$resp" sent)" "false"
+is "  and no webhook" "$(wh_n)" "0"
+route_clear
+resp=$(post_route '{"device":"laptop","idle":9999}')
+is "phone owner before the handoff attempt" "$(jget "$resp" route)" "phone"
+before=$(wh_n)
+resp=$(post_handoff '{"meeting":false}')
+is "a phone hour does not hand off" "$(jget "$resp" route)" "phone"
+is "  sent is false" "$(jget "$resp" sent)" "false"
+is "  webhook count unchanged" "$(wh_n)" "$before"
+route_clear
+resp=$(post_handoff '{"meeting":false}')
+is "an unclaimed hour does not hand off" "$(jget "$resp" route)" "none"
+is "  and sends nothing" "$(wh_n)" "0"
+route_clear
+resp=$(post_answered '{"how":"snooze"}')
+is "an answer with no owner still claims the laptop" "$(jget "$resp" route)" "answered"
+is "  so the phone job will not send" "$(slot_of | cut -f1)" "laptop"
+resp=$(post_route '{"device":"hub"}')
+is "  the later route stays laptop" "$(jget "$resp" route)" "laptop"
+is "  and sends nothing" "$(wh_n)" "0"
+
+route_clear
+printf '500\n' >"$TMP/wh-status"
+resp=$(post_route '{"device":"laptop","idle":9999}')
+is "a failed webhook still owns the hour as phone" "$(jget "$resp" route)" "phone"
+is "  detail is the status" "$(slot_of | cut -f2)" "webhook-failed:500"
+is "  one attempt" "$(wh_n)" "1"
+is "  and the hub log says so" "$(grep -c 'ERROR: webhook failed' "$GTG_STATE_DIR/nudge.log")" "1"
+printf '200\n' >"$TMP/wh-status"
+route_clear
+rm -f "$GTG_CONF_DIR/grok-webhook"
+resp=$(post_route '{"device":"laptop","idle":9999}')
+is "a missing webhook file skips" "$(jget "$resp" route)" "skip:no-webhook"
+is "  loudly" "$(grep -c 'no grok-webhook' "$GTG_STATE_DIR/nudge.log")" "1"
+is "  and sends nothing" "$(wh_n)" "0"
+is "the webhook key is not in the hub log" \
+  "$(grep -F -l 'wh-test-key' "$GTG_STATE_DIR/nudge.log" "$GTG_STATE_DIR/slots.tsv" "$TMP/route-server.err" 2>/dev/null | wc -l | tr -d ' ')" "0"
+printf '%s\n%s\n' "http://127.0.0.1:${wh_port}/hook" "wh-test-key" >"$GTG_CONF_DIR/grok-webhook"
+chmod 600 "$GTG_CONF_DIR/grok-webhook"
+
+route_clear
+out=$(GTG_ROUTE_URL="http://127.0.0.1:$route_port/api/route" ./bin/gtg-route 2>&1)
+is "the scheduler sends an unclaimed hour to the phone" "$(printf '%s\n' "$out" | grep -c 'routed: phone')" "1"
+is "  one webhook" "$(wh_n)" "1"
+route_clear
+post_route '{"device":"laptop","idle":0}' >/dev/null
+out=$(GTG_ROUTE_URL="http://127.0.0.1:$route_port/api/route" ./bin/gtg-route 2>&1)
+is "the scheduler leaves a laptop hour alone" "$(printf '%s\n' "$out" | grep -c 'routed: laptop')" "1"
+is "  and does not send" "$(wh_n)" "0"
+
+# Laptop nudge. osascript, idle, calendar and Hammerspoon are stubs. ssh is
+# the suite's stub and fails closed, so a pull cannot replace this log.
+cat >"$TMP/bin/fake-osa" <<'STUB'
+#!/bin/bash
+cat >"${GTG_DIALOG_SCRIPT:-/dev/null}"
+printf 'shown\n' >>"${GTG_DIALOG_LOG:-/dev/null}"
+n=0
+[ -f "${GTG_DIALOG_N:-/dev/null}" ] && n=$(cat "$GTG_DIALOG_N")
+n=$((n + 1))
+printf '%s' "$n" >"$GTG_DIALOG_N"
+case "${GTG_DIALOG:-snooze}" in
+  timeout) sleep "${GTG_DIALOG_SLEEP:-0}"; printf '__TIMEOUT__' ;;
+  did) printf 'Did it' ;;
+  off)
+    if [ "$n" -eq 1 ]; then printf 'Other...'; else printf 'off'; fi ;;
+  *) printf 'Snooze' ;;
+esac
+STUB
+cat >"$TMP/bin/fake-idle" <<'STUB'
+#!/bin/bash
+n=0
+[ -f "$GTG_IDLE_N" ] && n=$(cat "$GTG_IDLE_N")
+n=$((n + 1))
+printf '%s' "$n" >"$GTG_IDLE_N"
+if [ "$n" -le 1 ]; then printf '%s' "${IDLE_A:-0}"; else printf '%s' "${IDLE_B:-0}"; fi
+STUB
+chmod +x "$TMP/bin/fake-osa" "$TMP/bin/fake-idle"
+export GTG_OSASCRIPT="$TMP/bin/fake-osa" GTG_IDLE_CMD="$TMP/bin/fake-idle"
+export GTG_DIALOG_LOG="$TMP/dialog-log" GTG_DIALOG_SCRIPT="$TMP/dialog-script"
+export GTG_DIALOG_N="$TMP/dialog-n" GTG_IDLE_N="$TMP/idle-n"
+export GTG_ICAL="" GTG_HS=""
+export GTG_SSH_FAIL=1 GTG_RSYNC_FAIL=1
+export GTG_NO_CALENDAR=1 GTG_NO_PAGE=1
+route_path=$PATH
+PATH="$TMP/bin:$PATH"
+dialog_n() {
+  if [ -f "$TMP/dialog-log" ]; then grep -c '^shown$' "$TMP/dialog-log" || true
+  else echo 0; fi
+}
+stamp_set() { [ -f "$GTG_STATE_DIR/last-nudge" ] && echo yes || echo no; }
+answered_how() {
+  awk -F'\t' '$3=="answered" { h=$4 } END { printf "%s", h }' "$GTG_STATE_DIR/slots.tsv" 2>/dev/null || true
+}
+
+route_plan
+route_clear
+: >"$TMP/dialog-n"
+export GTG_DIALOG=snooze IDLE_A=0 IDLE_B=0
+out=$(./bin/gtg-nudge 2>&1)
+is "no hub: the dialog still shows" "$(dialog_n)" "1"
+is "  and gives up after 15 minutes" "$(grep -c 'giving up after 900' "$TMP/dialog-script")" "1"
+is "  with no routing line" "$(printf '%s\n' "$out" | grep -c 'routed:')" "0"
+is "  snooze leaves the slot unstamped" "$(stamp_set)" "no"
+
+route_plan
+printf 'HUB=mini\n' >>"$GTG_CONF_DIR/plan.txt"
+route_clear
+: >"$TMP/dialog-n"
+export GTG_DIALOG=snooze IDLE_A=0
+out=$(./bin/gtg-nudge 2>&1)
+is "present: the dialog shows" "$(dialog_n)" "1"
+is "  and gives up after 5 minutes" "$(grep -c 'giving up after 300' "$TMP/dialog-script")" "1"
+is "  the hour is the laptop's" "$(slot_of | cut -f1)" "laptop"
+is "  a snooze is answered" "$(answered_how)" "snooze"
+is "  and still unstamped" "$(stamp_set)" "no"
+is "  no phone ping" "$(wh_n)" "0"
+
+route_clear
+: >"$TMP/dialog-n"
+export IDLE_A=99999
+out=$(./bin/gtg-nudge 2>&1)
+is "idle: no dialog" "$(dialog_n)" "0"
+is "  routed to the phone" "$(printf '%s\n' "$out" | grep -c 'routed: phone')" "1"
+is "  unstamped" "$(stamp_set)" "no"
+is "  one webhook" "$(wh_n)" "1"
+
+route_clear
+: >"$TMP/dialog-n"
+closed=$(/usr/bin/python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+sed -i '' "s|^HUB_URL=.*|HUB_URL=http://127.0.0.1:$closed|" "$GTG_CONF_DIR/plan.txt"
+export GTG_DIALOG=snooze IDLE_A=0
+out=$(./bin/gtg-nudge 2>&1)
+is "hub down: the dialog still shows" "$(dialog_n)" "1"
+is "  and the log says why" "$(printf '%s\n' "$out" | grep -c 'routed: hub unreachable, showing the dialog')" "1"
+printf 'HUB_URL=http://127.0.0.1:%s\n' "$route_port" >>"$GTG_CONF_DIR/plan.txt"
+# The failed URL line is still first. cfg takes the first. Replace the file's URL.
+sed -i '' "s|^HUB_URL=.*|HUB_URL=http://127.0.0.1:$route_port|" "$GTG_CONF_DIR/plan.txt"
+
+route_clear
+: >"$TMP/dialog-n"
+mv "$GTG_CONF_DIR/token" "$TMP/token-aside"
+export IDLE_A=0 GTG_DIALOG=snooze
+out=$(./bin/gtg-nudge 2>&1)
+is "a missing token is loud" "$(printf '%s\n' "$out" | grep -c 'ERROR: no token')" "1"
+is "  and the dialog still shows" "$(dialog_n)" "1"
+mv "$TMP/token-aside" "$GTG_CONF_DIR/token"
+
+route_clear
+: >"$TMP/dialog-n"
+sed -i '' '/^HUB_URL=/d' "$GTG_CONF_DIR/plan.txt"
+out=$(./bin/gtg-nudge 2>&1)
+is "a missing HUB_URL is loud" "$(printf '%s\n' "$out" | grep -c 'HUB_URL is not')" "1"
+is "  and the dialog still shows" "$(dialog_n)" "1"
+printf 'HUB_URL=http://127.0.0.1:%s\n' "$route_port" >>"$GTG_CONF_DIR/plan.txt"
+
+route_clear
+: >"$TMP/dialog-n"
+printf '%s' "$(date +%s)" >"$GTG_STATE_DIR/last-nudge"
+sed -i '' "s|^HUB_URL=.*|HUB_URL=http://127.0.0.1:$closed|" "$GTG_CONF_DIR/plan.txt"
+out=$(./bin/gtg-nudge 2>&1)
+is "a debounced fire never asks the hub" "$(printf '%s\n' "$out" | grep -c 'skip: debounced')" "1"
+is "  and does not mention the hub" "$(printf '%s\n' "$out" | grep -c 'hub unreachable')" "0"
+rm -f "$GTG_STATE_DIR/last-nudge"
+printf '%s\tsick\n' "$(( $(date +%s) + 3600 ))" >"$GTG_STATE_DIR/paused"
+out=$(./bin/gtg-nudge 2>&1)
+is "a paused fire never asks the hub" "$(printf '%s\n' "$out" | grep -c 'skip: paused until')" "1"
+is "  and does not mention the hub" "$(printf '%s\n' "$out" | grep -c 'hub unreachable')" "0"
+rm -f "$GTG_STATE_DIR/paused"
+w=$(( ($(date +%-H) + 1) % 24 ))
+sed -i '' "s/^WAKE_START=.*/WAKE_START=$w/; s/^WAKE_END=.*/WAKE_END=$((w + 1))/" "$GTG_CONF_DIR/plan.txt"
+out=$(./bin/gtg-nudge 2>&1)
+is "an asleep fire never asks the hub" "$(printf '%s\n' "$out" | grep -c 'outside waking hours')" "1"
+is "  and does not mention the hub" "$(printf '%s\n' "$out" | grep -c 'hub unreachable')" "0"
+route_plan
+printf 'HUB=mini\n' >>"$GTG_CONF_DIR/plan.txt"
+
+route_clear
+: >"$TMP/dialog-n"
+export GTG_DIALOG=timeout GTG_DIALOG_SLEEP=2 IDLE_A=0 IDLE_B=99999
+out=$(./bin/gtg-nudge 2>&1)
+is "no input during the dialog hands off" "$(printf '%s\n' "$out" | grep -c 'routed: handoff')" "1"
+is "  exactly one webhook" "$(wh_n)" "1"
+is "  and the dialog was shown" "$(dialog_n)" "1"
+is "  unstamped" "$(stamp_set)" "no"
+
+route_clear
+: >"$TMP/dialog-n"
+export GTG_DIALOG=timeout GTG_DIALOG_SLEEP=2 IDLE_A=0 IDLE_B=0
+out=$(./bin/gtg-nudge 2>&1)
+is "input during the dialog does not hand off" "$(printf '%s\n' "$out" | grep -c 'routed: handoff')" "0"
+is "  no webhook" "$(wh_n)" "0"
+is "  today's no-answer line" "$(printf '%s\n' "$out" | grep -c 'no answer')" "1"
+is "  unstamped" "$(stamp_set)" "no"
+
+route_clear
+: >"$TMP/dialog-n"
+export GTG_DIALOG=did IDLE_A=0
+out=$(./bin/gtg-nudge 2>&1)
+is "Did it records answered" "$(answered_how)" "log"
+is "  and stamps" "$(stamp_set)" "yes"
+is "  a set was logged" "$(wc -l <"$GTG_STATE_DIR/log.tsv" | tr -d ' ')" "1"
+is "  no webhook" "$(wh_n)" "0"
+
+route_clear
+: >"$TMP/dialog-n"
+export GTG_DIALOG=off IDLE_A=0
+out=$(./bin/gtg-nudge 2>&1)
+is "off records answered" "$(answered_how)" "off"
+is "  and does not stamp" "$(stamp_set)" "no"
+is "  the pause is on" "$([ -s "$GTG_STATE_DIR/paused" ] && echo yes || echo no)" "yes"
+
+is "route tests never called ssh or rsync" \
+  "$([ -s "$GTG_SSH_LEAK" ] && echo leak || echo clean)" "clean"
+
+if [ -n "${route_srv_pid:-}" ]; then
+  kill "$route_srv_pid" 2>/dev/null || true
+  wait "$route_srv_pid" 2>/dev/null || true
+  route_srv_pid=""
+fi
+if [ -n "${wh_pid:-}" ]; then
+  kill "$wh_pid" 2>/dev/null || true
+  wait "$wh_pid" 2>/dev/null || true
+  wh_pid=""
+fi
+PATH=$route_path
+unset GTG_OSASCRIPT GTG_IDLE_CMD GTG_DIALOG GTG_DIALOG_LOG GTG_DIALOG_SCRIPT GTG_DIALOG_N
+unset GTG_IDLE_N GTG_ICAL GTG_HS GTG_DIALOG_SLEEP IDLE_A IDLE_B GTG_SSH_FAIL GTG_RSYNC_FAIL
+unset GTG_ROUTE_URL
+rm -f "$GTG_CONF_DIR/grok-webhook" "$GTG_CONF_DIR/token" "$GTG_STATE_DIR/slots.tsv" \
+      "$GTG_STATE_DIR/paused" "$GTG_STATE_DIR/last-nudge" "$GTG_STATE_DIR/nudge.log"
 reset_plan
 
 echo "== isolation: nothing live was touched =="

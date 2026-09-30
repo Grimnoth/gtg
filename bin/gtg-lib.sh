@@ -667,6 +667,44 @@ hub_ssh() {
   "$sshq" -o BatchMode=yes -o ConnectTimeout=4 "$1" "$2"
 }
 
+# POST JSON to the hub's HTTP server. Exit 2 when the token file is missing,
+# 1 when the server does not answer, 0 with the body on stdout.
+#
+# HTTP, not ssh. ssh would be a second writer of slots.tsv unless it only
+# called this same server. The server is the only writer, and it holds its
+# lock across the claim and the webhook. The token is read inside python and
+# never printed. 25s sits above the server's 15s webhook, so a slow phone
+# ping cannot expire here and also fail open into a laptop dialog.
+hub_http_post() { # URL JSON
+  local url="$1" body="$2" token="$CONF_DIR/token"
+  [ -s "$token" ] || return 2
+  GTG_HTTP_URL="$url" GTG_HTTP_JSON="$body" GTG_HTTP_TOKEN="$token" \
+    /usr/bin/python3 - <<'PY'
+import os, sys, urllib.request
+url = os.environ["GTG_HTTP_URL"]
+payload = os.environ["GTG_HTTP_JSON"].encode("utf-8")
+try:
+    fh = open(os.environ["GTG_HTTP_TOKEN"], "r")
+    token = fh.read().strip()
+    fh.close()
+except OSError:
+    token = ""
+if not token:
+    sys.exit(2)
+req = urllib.request.Request(url, data=payload, method="POST")
+req.add_header("Content-Type", "application/json")
+req.add_header("Authorization", "Bearer " + token)
+try:
+    resp = urllib.request.urlopen(req, timeout=25)
+    try:
+        sys.stdout.write(resp.read().decode("utf-8"))
+    finally:
+        resp.close()
+except Exception:
+    sys.exit(1)
+PY
+}
+
 # Run gtg on the hub. Arguments are the remote argv, quoted for its shell.
 # HUB_GTG is relative to the remote home; ssh starts there.
 hub_send() {
