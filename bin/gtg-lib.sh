@@ -147,9 +147,11 @@ current_gateway_mac() {
 # The file holds one gateway MAC per line, not just one, so a second house, an
 # office, or a replaced router can all count as "home". `gtg home` appends the
 # network you are on now.
+# An argument is a gateway already read, so a caller that also acts on
+# whether the read worked classifies the same answer it checked.
 where_am_i() {
   local cur
-  cur=$(current_gateway_mac || true)
+  if [ $# -gt 0 ]; then cur=$1; else cur=$(current_gateway_mac || true); fi
   if [ -n "$cur" ] && [ -s "$HOME_MAC_FILE" ] && grep -qxF "$cur" "$HOME_MAC_FILE" 2>/dev/null; then
     printf 'home'
   else

@@ -92,7 +92,11 @@ route_ask() {
   esac
   meet=false
   [ "${busy_now:-no}" = yes ] && meet=true
-  json=$(ROUTE_IDLE="$idle" ROUTE_MEETING="$meet" ROUTE_WHERE="$where" /usr/bin/python3 -c 'import json,os; print(json.dumps({"device":"laptop","idle":int(os.environ["ROUTE_IDLE"]),"meeting":os.environ["ROUTE_MEETING"]=="true","where":os.environ["ROUTE_WHERE"]}))')
+  json=$(ROUTE_IDLE="$idle" ROUTE_MEETING="$meet" ROUTE_WHERE="$route_where" /usr/bin/python3 -c 'import json,os
+body={"device":"laptop","idle":int(os.environ["ROUTE_IDLE"]),"meeting":os.environ["ROUTE_MEETING"]=="true"}
+if os.environ["ROUTE_WHERE"]:
+    body["where"]=os.environ["ROUTE_WHERE"]
+print(json.dumps(body))')
   route_try "$url" "$json"
   # ponytail: retry the same POST once. Routing is idempotent per slot, so
   # the second call returns the owner and sends nothing. Residual: both
@@ -138,8 +142,10 @@ maybe_handoff() {
   [ -s "$CONF_DIR/token" ] || return 0
   meet=false
   [ "${busy_now:-no}" = yes ] && meet=true
-  json=$(ROUTE_MEETING="$meet" ROUTE_SLOT="${ROUTE_SLOT:-}" ROUTE_WHERE="$where" /usr/bin/python3 -c 'import json,os
-body={"meeting":os.environ["ROUTE_MEETING"]=="true","where":os.environ["ROUTE_WHERE"]}
+  json=$(ROUTE_MEETING="$meet" ROUTE_SLOT="${ROUTE_SLOT:-}" ROUTE_WHERE="$route_where" /usr/bin/python3 -c 'import json,os
+body={"meeting":os.environ["ROUTE_MEETING"]=="true"}
+if os.environ["ROUTE_WHERE"]:
+    body["where"]=os.environ["ROUTE_WHERE"]
 slot=os.environ.get("ROUTE_SLOT","")
 if slot:
     body["slot"]=slot
@@ -233,7 +239,15 @@ if pause_active; then
 fi
 
 # --- 4. home vs away --------------------------------------------------------
-where=$(where_am_i)
+gateway=$(current_gateway_mac || true)
+where=$(where_am_i "$gateway")
+# The hub sends an away hour to the phone even at the keyboard, so it only
+# hears a location this machine actually read. No gateway, or no home list,
+# is unknown rather than away: the idle rule decides instead.
+route_where=$where
+if [ -z "$gateway" ] || [ ! -s "$HOME_MAC_FILE" ]; then
+  route_where=""
+fi
 
 # --- 5. meeting check -------------------------------------------------------
 # FAILS OPEN on purpose: a missing icalBuddy, a refused calendar grant, a bad

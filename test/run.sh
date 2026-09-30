@@ -1682,10 +1682,11 @@ loader = importlib.machinery.SourceFileLoader("gtg_server", sys.argv[1])
 spec = importlib.util.spec_from_loader("gtg_server", loader)
 m = importlib.util.module_from_spec(spec)
 loader.exec_module(m)
-def route(idle, done, paused, window, present):
+def route(idle, done, paused, window, present, where=None):
     idle_v = None if idle == "none" else int(idle)
     return m.slot_route("2026-09-30T10", "2026-09-30T10:20:00", idle_v,
-                        done == "1", paused == "1", window == "1", int(present))
+                        done == "1", paused == "1", window == "1", int(present),
+                        where)
 print("present " + route("30", "0", "0", "1", "180"))
 print("boundary " + route("180", "0", "0", "1", "180"))
 print("inside " + route("179", "0", "0", "1", "180"))
@@ -1696,6 +1697,10 @@ print("asleep " + route("0", "0", "0", "0", "180"))
 print("tight-phone " + route("30", "0", "0", "1", "10"))
 print("tight-laptop " + route("5", "0", "0", "1", "10"))
 print("bad-present " + route("30", "0", "0", "1", "0"))
+print("home-present " + route("0", "0", "0", "1", "180", "home"))
+print("away-present " + route("0", "0", "0", "1", "180", "away"))
+print("away-done " + route("0", "1", "0", "1", "180", "away"))
+print("away-asleep " + route("0", "0", "0", "0", "180", "away"))
 log = sys.argv[2]
 def write(rows):
     fh = open(log, "w")
@@ -1741,6 +1746,10 @@ is "outside the window skips" "$(u asleep)" "skip:asleep-hours"
 is "IDLE_PRESENT sends 30s idle to the phone" "$(u tight-phone)" "phone"
 is "  and 5s stays" "$(u tight-laptop)" "laptop"
 is "a bad IDLE_PRESENT falls back to 180" "$(u bad-present)" "laptop"
+is "present at home stays on the laptop" "$(u home-present)" "laptop"
+is "present but away goes to the phone" "$(u away-present)" "phone"
+is "  a logged set still skips away" "$(u away-done)" "skip:done"
+is "  and so does the waking window" "$(u away-asleep)" "skip:asleep-hours"
 is "hour 09 does not eat hour 19" "$(u hour09)" "yes"
 is "  hour 19 is its own hour" "$(u hour19)" "yes"
 is "  and hour 08 had no set" "$(u hour08)" "no"
@@ -2009,6 +2018,14 @@ is "laptop idle reports where=away" "$(wh_field 0 where)" "away"
 is "  and the pick is the away preselect" "$(wh_field 0 pick)" "$away_pick"
 is "  the slot records where" "$(slot_of | cut -f2 | grep -c 'where=away')" "1"
 route_clear
+resp=$(post_route '{"device":"laptop","idle":0,"where":"away"}')
+is "a busy laptop away from home routes to the phone" "$(jget "$resp" route)" "phone"
+is "  and the phone is pinged once" "$(wh_n)" "1"
+route_clear
+resp=$(post_route '{"device":"laptop","idle":0,"where":"home"}')
+is "a busy laptop at home keeps the hour" "$(jget "$resp" route)" "laptop"
+is "  and the phone hears nothing" "$(wh_n)" "0"
+route_clear
 day=$(date '+%Y-%m-%d')
 if [ "$(date '+%H')" = "23" ]; then other="${day}T00"; else other="${day}T23"; fi
 printf '%s\t%s\tlaptop\tmeeting=0;where=away\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$other" \
@@ -2076,6 +2093,28 @@ stamp_set() { [ -f "$GTG_STATE_DIR/last-nudge" ] && echo yes || echo no; }
 answered_how() {
   awk -F'\t' '$3=="answered" { h=$4 } END { printf "%s", h }' "$GTG_STATE_DIR/slots.tsv" 2>/dev/null || true
 }
+
+# The laptop is at home for everything below: away, the hub phones instead.
+route_plan
+printf 'HUB=mini\n' >>"$GTG_CONF_DIR/plan.txt"
+route_clear
+printf '00:00:00:00:00:00\n' >"$GTG_CONF_DIR/home-gateway-mac"
+: >"$TMP/dialog-n"
+export GTG_DIALOG=snooze IDLE_A=0 IDLE_B=0
+out=$(./bin/gtg-nudge 2>&1)
+is "away and at the keyboard: no dialog" "$(dialog_n)" "0"
+is "  the phone gets the hour" "$(wh_n)" "1"
+is "  and the nudge log says so" "$(printf '%s\n' "$out" | grep -c 'routed: phone')" "1"
+
+# No home list is unknown, not away: the idle rule keeps the laptop.
+route_clear
+rm -f "$GTG_CONF_DIR/home-gateway-mac"
+: >"$TMP/dialog-n"
+out=$(./bin/gtg-nudge 2>&1)
+is "no home list and at the keyboard: the dialog shows" "$(dialog_n)" "1"
+is "  the phone hears nothing" "$(wh_n)" "0"
+is "  and the slot records no where" "$(grep -c 'where=' "$GTG_STATE_DIR/slots.tsv")" "0"
+printf '%s\n' "$(current_gateway_mac || true)" >"$GTG_CONF_DIR/home-gateway-mac"
 
 route_plan
 route_clear
@@ -2341,7 +2380,8 @@ PATH=$route_path
 unset GTG_OSASCRIPT GTG_IDLE_CMD GTG_DIALOG GTG_DIALOG_LOG GTG_DIALOG_SCRIPT GTG_DIALOG_N
 unset GTG_IDLE_N GTG_ICAL GTG_HS GTG_DIALOG_SLEEP IDLE_A IDLE_B GTG_SSH_FAIL GTG_RSYNC_FAIL
 unset GTG_ROUTE_URL
-rm -f "$GTG_CONF_DIR/grok-webhook" "$GTG_CONF_DIR/token" "$GTG_STATE_DIR/slots.tsv" \
+rm -f "$GTG_CONF_DIR/grok-webhook" "$GTG_CONF_DIR/token" "$GTG_CONF_DIR/home-gateway-mac" \
+      "$GTG_STATE_DIR/slots.tsv" \
       "$GTG_STATE_DIR/paused" "$GTG_STATE_DIR/last-nudge" "$GTG_STATE_DIR/nudge.log"
 reset_plan
 
