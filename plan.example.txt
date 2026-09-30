@@ -50,7 +50,13 @@ MIC=
 # at. Create it in Google Calendar (or Calendar.app) first; empty = off.
 # Add the same name to IGNORE_CALENDARS below so the nudge never reads its
 # own sets back as meetings. `gtg calendar-sync` backfills older rows.
+# This is the laptop path. The hub uses GCAL_ID below.
 CALENDAR=
+
+# Hub only. The calendar id from Google Calendar settings, Integrate calendar.
+# A service-account key at ~/.config/gtg/gcal-key.json (mode 600) writes sets
+# straight to that calendar. Leave this commented on the laptop.
+# GCAL_ID=
 
 # Client only. An ssh host that owns the log and the calendar. Absent means
 # this machine is the hub and writes both itself. HUB_GTG is the gtg on that

@@ -1,0 +1,364 @@
+#!/usr/bin/python3
+"""Write one set straight to Google Calendar.
+
+Usage: gtg-gcal SUMMARY ISO WHERE
+
+Calendar.app on the hub needs a signed-in desktop, lags behind Google, and
+answers "already there?" from a stale local cache. This talks to the
+Calendar API instead. ISO is local time, YYYY-MM-DDTHH:MM:SS.
+"""
+
+import base64
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta
+from urllib.parse import quote, urlencode
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+SCOPE = "https://www.googleapis.com/auth/calendar.events"
+# An ambient HTTP_PROXY would carry the bearer token off the machine, and
+# would also hide the suite's stub on 127.0.0.1.
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+TIMEOUT = 15
+
+
+def conf_dir():
+    return os.environ.get("GTG_CONF_DIR") or os.path.expanduser("~/.config/gtg")
+
+
+def state_dir():
+    return os.environ.get("GTG_STATE_DIR") or os.path.expanduser("~/.local/state/gtg")
+
+
+def fail(msg):
+    sys.stderr.write("%s\n" % msg)
+    return 1
+
+
+def b64url(data):
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def zone_name():
+    tz = os.environ.get("TZ") or ""
+    if tz.startswith(":"):
+        tz = tz[1:]
+    if tz:
+        return tz
+    path = os.path.realpath("/etc/localtime")
+    mark = "zoneinfo/"
+    i = path.find(mark)
+    if i < 0:
+        return ""
+    return path[i + len(mark):]
+
+
+def event_id(summary, iso, where):
+    raw = ("%s\t%s\t%s" % (summary, iso, where)).encode("utf-8")
+    return "gtg" + hashlib.sha1(raw).hexdigest()
+
+
+def minute_bounds(iso, tzname):
+    naive = datetime.strptime(iso, "%Y-%m-%dT%H:%M:%S").replace(second=0, microsecond=0)
+    try:
+        start = naive.replace(tzinfo=ZoneInfo(tzname))
+    except ZoneInfoNotFoundError:
+        return "", ""
+    # timeMin is an exclusive lower bound on the event's end. A zero-minute
+    # event ends at its start, so a bound on the minute itself hides it and
+    # the next sync inserts a duplicate.
+    begin = start - timedelta(seconds=1)
+    end = start + timedelta(seconds=60)
+    return begin.isoformat(), end.isoformat()
+
+
+def read_key():
+    path = os.path.join(conf_dir(), "gcal-key.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except OSError:
+        return None, "cannot read %s" % path
+    except ValueError:
+        # The parser's own message quotes the file, which is the private key.
+        return None, "key file is not json"
+    if not isinstance(data, dict):
+        return None, "key file is not json"
+    for field in ("client_email", "private_key", "token_uri"):
+        if not data.get(field) or not isinstance(data.get(field), str):
+            return None, "key file missing %s" % field
+    return data, ""
+
+
+def sign_rs256(pem, payload):
+    # Python 3.9's stdlib cannot sign RSA. The key is a file only for the
+    # length of the openssl call, mode 0600, and removed on every exit.
+    if isinstance(pem, str):
+        pem = pem.encode("utf-8")
+    fd, path = tempfile.mkstemp(prefix="gtg-gcal-", suffix=".pem")
+    try:
+        os.chmod(path, 0o600)
+        os.write(fd, pem)
+        os.close(fd)
+        fd = -1
+        proc = subprocess.run(
+            ["/usr/bin/openssl", "dgst", "-sha256", "-sign", path],
+            input=payload,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if proc.returncode != 0:
+            err = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+            detail = err[0] if err else "openssl sign failed"
+            raise OSError(detail)
+        return proc.stdout
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def make_jwt(email, token_uri, pem):
+    now = int(time.time())
+    header = b64url(json.dumps({"alg": "RS256", "typ": "JWT"}, separators=(",", ":")))
+    payload = b64url(json.dumps({
+        "iss": email,
+        "scope": SCOPE,
+        "aud": token_uri,
+        "iat": now,
+        "exp": now + 3600,
+    }, separators=(",", ":")))
+    signing = ("%s.%s" % (header, payload)).encode("ascii")
+    return "%s.%s" % (signing.decode("ascii"), b64url(sign_rs256(pem, signing)))
+
+
+def write_private(path, text):
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, text.encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+
+
+def token_cache_path():
+    return os.path.join(state_dir(), "gcal-token.json")
+
+
+def load_cached_token():
+    try:
+        with open(token_cache_path(), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    token = data.get("access_token")
+    expiry = data.get("expiry")
+    if not isinstance(token, str) or not token:
+        return ""
+    # bool is an int. A JSON true must not count as an expiry.
+    if isinstance(expiry, bool) or not isinstance(expiry, (int, float)):
+        return ""
+    # Refresh a minute early so a slow insert does not race the expiry.
+    if time.time() >= float(expiry) - 60:
+        return ""
+    return token
+
+
+def store_token(token, expiry):
+    payload = json.dumps({"access_token": token, "expiry": int(expiry)})
+    write_private(token_cache_path(), payload)
+
+
+def perform(req):
+    try:
+        resp = OPENER.open(req, timeout=TIMEOUT)
+    except urllib.error.HTTPError as err:
+        try:
+            raw = err.read()
+        except Exception:
+            raw = b""
+        err.close()
+        return err.code, raw
+    try:
+        return resp.getcode(), resp.read()
+    finally:
+        resp.close()
+
+
+def error_line(status, raw):
+    msg = ""
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeError):
+        data = None
+    if isinstance(data, dict):
+        err = data.get("error")
+        if isinstance(err, dict):
+            message = err.get("message") or ""
+            msg = message if isinstance(message, str) else ""
+        elif isinstance(err, str):
+            desc = data.get("error_description") or err
+            msg = desc if isinstance(desc, str) else err
+    msg = msg.replace("\n", " ").strip()
+    if not msg:
+        text = raw.decode("utf-8", "replace").strip().replace("\n", " ")
+        msg = text[:200] if text else "request failed"
+    return "%s %s" % (status, msg)
+
+
+def fetch_token(key):
+    assertion = make_jwt(key["client_email"], key["token_uri"], key["private_key"])
+    data = urlencode({
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion": assertion,
+    }).encode("ascii")
+    req = urllib.request.Request(key["token_uri"], data=data, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    code, raw = perform(req)
+    if code != 200:
+        return "", error_line(code, raw)
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return "", "token response was not json"
+    if not isinstance(body, dict):
+        return "", "token response was not json"
+    token = body.get("access_token")
+    if not isinstance(token, str) or not token:
+        return "", "token response had no access_token"
+    try:
+        expires_in = int(body.get("expires_in") or 3600)
+    except (TypeError, ValueError):
+        expires_in = 3600
+    store_token(token, int(time.time()) + expires_in)
+    return token, ""
+
+
+def access_token(key):
+    cached = load_cached_token()
+    if cached:
+        return cached, ""
+    return fetch_token(key)
+
+
+def api_base():
+    base = os.environ.get("GTG_GCAL_API") or "https://www.googleapis.com/calendar/v3"
+    return base.rstrip("/")
+
+
+def events_url(cal_id):
+    return "%s/calendars/%s/events" % (api_base(), quote(cal_id, safe=""))
+
+
+def already_there(token, cal_id, summary, time_min, time_max):
+    # AppleScript events have random ids, so the deterministic id below
+    # cannot see them. Same summary inside this minute is the same set.
+    qs = urlencode({
+        "timeMin": time_min,
+        "timeMax": time_max,
+        "singleEvents": "true",
+    })
+    req = urllib.request.Request("%s?%s" % (events_url(cal_id), qs), method="GET")
+    req.add_header("Authorization", "Bearer %s" % token)
+    code, raw = perform(req)
+    if code != 200:
+        return None, error_line(code, raw)
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return None, "list response was not json"
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        items = []
+    for ev in items:
+        if isinstance(ev, dict) and ev.get("summary") == summary:
+            return True, ""
+    return False, ""
+
+
+def insert_event(token, cal_id, body):
+    raw_body = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(events_url(cal_id), data=raw_body, method="POST")
+    req.add_header("Authorization", "Bearer %s" % token)
+    req.add_header("Content-Type", "application/json")
+    code, raw = perform(req)
+    # 409 is the id already existing: a repeat of this same set.
+    if code == 409:
+        return "exists", ""
+    if code != 200:
+        return "", error_line(code, raw)
+    return "written", ""
+
+
+def run(argv):
+    if len(argv) != 4:
+        return fail("usage: gtg-gcal SUMMARY ISO WHERE")
+    summary, iso, where = argv[1], argv[2], argv[3]
+    cal_id = os.environ.get("GTG_GCAL_ID") or ""
+    if not cal_id:
+        return fail("no GTG_GCAL_ID")
+    try:
+        datetime.strptime(iso, "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return fail("bad time")
+    tzname = zone_name()
+    if not tzname:
+        return fail("could not resolve timezone")
+    time_min, time_max = minute_bounds(iso, tzname)
+    if not time_min:
+        return fail("unknown timezone %s" % tzname)
+    key, err = read_key()
+    if err:
+        return fail(err)
+    token, err = access_token(key)
+    if err:
+        return fail(err)
+    there, err = already_there(token, cal_id, summary, time_min, time_max)
+    if err:
+        return fail(err)
+    if there:
+        print("exists")
+        return 0
+    # description is the place, which is what the AppleScript event carries.
+    outcome, err = insert_event(token, cal_id, {
+        "id": event_id(summary, iso, where),
+        "summary": summary,
+        "location": where,
+        "description": where,
+        "start": {"dateTime": iso, "timeZone": tzname},
+        "end": {"dateTime": iso, "timeZone": tzname},
+    })
+    if err:
+        return fail(err)
+    print(outcome)
+    return 0
+
+
+def main(argv):
+    try:
+        return run(argv)
+    except urllib.error.URLError as err:
+        return fail("gcal: %s" % getattr(err, "reason", err))
+    except OSError as err:
+        return fail("gcal: %s" % err)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

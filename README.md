@@ -215,17 +215,19 @@ order breaking a tie, since a whole round lands inside one second.
 
 ## Every set is also a calendar event
 
-Set `CALENDAR=GTG` in `plan.txt` and every logged set is mirrored onto that
-calendar as a zero-minute event at the set's own time, so a backdated 7:15
-set lands at 7:15. The calendar lives in Google, synced into Calendar.app, so
-the history is on the phone and in the calendar already being looked at. The
-write goes through Calendar.app by AppleScript, in the background, and is
-idempotent: the same set at the same minute is never written twice. With
+Every logged set is mirrored onto a calendar as a zero-minute event at the
+set's own time, so a backdated 7:15 set lands at 7:15. The calendar lives in
+Google, so the history is on the phone and in the calendar already being
+looked at. The same set at the same minute is never written twice. With
 `HUB=` set, this machine does not write the calendar. The hub does, when the
 row arrives.
 
+On the laptop, `CALENDAR=GTG` writes through Calendar.app by AppleScript, in
+the background. On the hub, `GCAL_ID=` writes straight to Google. With
+neither set, nothing is written.
+
 `gtg calendar-sync 30` writes the last 30 days. It is the one-time backfill,
-and the repair if Calendar.app was not running for a while. Safe to re-run.
+and the repair when a run was missed. Safe to re-run.
 
 The first run of it put `dead hang xhome` on the calendar. Reading the log
 with `IFS=$'\t' read` collapses a run of empty fields, so a timed set with no
@@ -245,6 +247,31 @@ to record. `AbandonProcessGroup` in the plist is the fix, and it was
 measured before it was trusted: two throwaway jobs, one with the key and one
 without, and only one child survived. Re-run `install.sh` after pulling this
 so the loaded job carries it.
+
+### Direct to Google
+
+The hub writes through the Calendar API. Calendar.app on a headless Mac
+needs a signed-in desktop session, it lags behind Google, and its check for
+an event already there reads a local cache that can be stale, so a sync
+wrote the same set twice.
+
+`GCAL_ID=` in `plan.txt` is the switch. `CALENDAR=` stays the laptop-only
+path. `gtg calendar-sync` runs when either one is set, and when it used
+`GCAL_ID` the summary line names that calendar id.
+
+One-time setup, on the hub:
+
+1. In a Google Cloud project, enable the Google Calendar API.
+2. Create a service account and a JSON key. Put the key at
+   `~/.config/gtg/gcal-key.json` and `chmod 600` it.
+3. Share the GTG calendar with the service account's email, permission
+   "Make changes to events".
+4. In the calendar's settings, under Integrate calendar, copy the calendar
+   id into `plan.txt`:
+
+```
+GCAL_ID=<calendar id from Settings > Integrate calendar>
+```
 
 ## The hub
 
@@ -268,7 +295,8 @@ forwarded to the hub. A later pull mirrors the hub's pause. If the forward
 does not get through, the local pause stays and the nudge log says so.
 
 The calendar belongs to the hub. `gtg calendar-sync` and `gtg backfill` on a
-client say so and do nothing.
+client say so and do nothing. On the hub, `GCAL_ID=` is the writer. The setup
+is under "Direct to Google".
 
 On the mini, `./install.sh hub` installs the server and a 15-minute calendar
 sync. It does not install the nudge. `./ship` updates this Mac and then, if

@@ -34,7 +34,7 @@ load_agent() { # LABEL SRC_PLIST [SUFFIX]
 # bar, no speech: those stay on the laptop that is in the room.
 if [ "${1:-}" = hub ]; then
   mkdir -p "$CONF_DIR" "$STATE_DIR" "$HOME/Library/LaunchAgents"
-  chmod +x "$REPO/bin/gtg" "$REPO/bin/gtg-nudge" "$REPO/bin/gtg-page" "$REPO/bin/gtg-interpret"
+  chmod +x "$REPO/bin/gtg" "$REPO/bin/gtg-nudge" "$REPO/bin/gtg-page" "$REPO/bin/gtg-interpret" "$REPO/bin/gtg-gcal"
   [ -f "$REPO/bin/gtg-server" ] && chmod +x "$REPO/bin/gtg-server"
   if [ ! -f "$CONF_DIR/plan.txt" ]; then
     cp "$REPO/plan.example.txt" "$CONF_DIR/plan.txt"
@@ -62,7 +62,7 @@ if [ "${1:-}" = hub ]; then
 fi
 
 mkdir -p "$CONF_DIR" "$STATE_DIR" "$HOME/.local/bin" "$HOME/Library/LaunchAgents"
-chmod +x "$REPO/bin/gtg" "$REPO/bin/gtg-nudge" "$REPO/bin/gtg-page" "$REPO/bin/gtg-interpret"
+chmod +x "$REPO/bin/gtg" "$REPO/bin/gtg-nudge" "$REPO/bin/gtg-page" "$REPO/bin/gtg-interpret" "$REPO/bin/gtg-gcal"
 
 # --- gtg say (optional) -----------------------------------------------------
 # On-device speech, through the framework macOS 26 ships. It is compiled here
