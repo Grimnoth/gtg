@@ -1,0 +1,559 @@
+#!/usr/bin/python3
+"""HTTP face for the gtg CLI.
+
+Every read and write is a subprocess of bin/gtg (or bin/gtg-page for the
+dashboard). This process does not parse the log.
+"""
+
+import hmac
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+GTG = os.path.join(HERE, "gtg")
+PAGE = os.path.join(HERE, "gtg-page")
+AGENT_MD = os.path.join(ROOT, "docs", "agent.md")
+
+CONF_DIR = os.environ.get("GTG_CONF_DIR") or os.path.expanduser("~/.config/gtg")
+STATE_DIR = os.environ.get("GTG_STATE_DIR") or os.path.expanduser("~/.local/state/gtg")
+TOKEN_PATH = os.path.join(CONF_DIR, "token")
+MAX_BODY = 64 * 1024
+PAGE_TTL = 60
+
+# cfg INTERPRET only reads plan.txt, so GTG_INTERPRET=off does not stop the
+# interpreter. GTG_INTERPRET_CMD is the switch gtg-interpret does honor:
+# /usr/bin/true prints nothing and the original refusal stands, with no model
+# call. A hit in the interpret cache is returned before either switch. That
+# cache lives in bin/gtg-interpret.
+LOG_ENV = {
+    "GTG_INTERPRET": "off",
+    "GTG_INTERPRET_CMD": "/usr/bin/true",
+}
+
+WRITE_LOCK = threading.Lock()
+PAGE_AT = [0.0]
+TOKEN = ""
+
+PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
+DEFAULT_PROTOCOL = "2025-06-18"
+PERIODS = ("today", "week", "history", "stats", "status")
+
+
+def die(msg):
+    sys.stderr.write("gtg-server: %s\n" % msg)
+    sys.exit(1)
+
+
+def load_token():
+    try:
+        with open(TOKEN_PATH, "r", encoding="utf-8") as fh:
+            token = fh.read().strip()
+    except OSError:
+        token = ""
+    if not token:
+        die("refusing to start: %s is missing or empty" % TOKEN_PATH)
+    return token
+
+
+def listen_port():
+    raw = os.environ.get("GTG_PORT", "8796")
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        die("GTG_PORT is not a number: %s" % raw)
+    if n < 1 or n > 65535:
+        die("GTG_PORT is out of range: %s" % raw)
+    return n
+
+
+def as_dict(value):
+    return value if isinstance(value, dict) else {}
+
+
+def gtg(args, extra_env=None, write=False):
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
+
+    def run():
+        proc = subprocess.run(
+            [GTG] + list(args),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            universal_newlines=True,
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+
+    if write:
+        with WRITE_LOCK:
+            return run()
+    return run()
+
+
+def envelope(rc, out, err):
+    return {"ok": rc == 0, "output": out, "error": err if err else None}
+
+
+def list_movements(args):
+    # known_movements is not a gtg command. options is today's pool; stats is
+    # every movement that has been logged, which is the closest the CLI comes.
+    rc1, opt, err1 = gtg(["options"])
+    rc2, stats, err2 = gtg(["stats"])
+    parts = []
+    if opt:
+        parts.append(opt.rstrip("\n"))
+    if stats:
+        parts.append(stats.rstrip("\n"))
+    output = ("\n".join(parts) + "\n") if parts else ""
+    err = (err1 or "") + (err2 or "")
+    ok = rc1 == 0 and rc2 == 0
+    status = 200 if ok else 400
+    return status, {"ok": ok, "output": output, "error": err or None}
+
+
+def decimal(value):
+    # Query strings and JSON both arrive here. Reject bool (it is an int) and
+    # anything that is not plain base-10, so a stray character cannot throw
+    # out of int() and take the request down.
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str) and value != "" and all("0" <= c <= "9" for c in value):
+        return int(value)
+    return None
+
+
+def get_summary(args):
+    args = as_dict(args)
+    period = args.get("period")
+    if period not in PERIODS:
+        return 400, {
+            "ok": False,
+            "output": "",
+            "error": "period must be today, week, history, stats, or status",
+        }
+    cmd = [period]
+    days = args.get("days")
+    if period == "history" and days is not None and days != "":
+        n = decimal(days)
+        if n is None:
+            return 400, {"ok": False, "output": "", "error": "days must be a number"}
+        cmd.append(str(n))
+    rc, out, err = gtg(cmd)
+    return (200 if rc == 0 else 400), envelope(rc, out, err)
+
+
+def pause(args):
+    args = as_dict(args)
+    dur = args.get("for")
+    reason = args.get("reason")
+    if dur is not None and not isinstance(dur, str):
+        return 400, {"ok": False, "output": "", "error": "for must be a string"}
+    if reason is not None and not isinstance(reason, str):
+        return 400, {"ok": False, "output": "", "error": "reason must be a string"}
+    cmd = ["off"]
+    if isinstance(dur, str) and dur.strip():
+        cmd.append(dur.strip())
+    if isinstance(reason, str) and reason.strip():
+        cmd.append(reason.strip())
+    rc, out, err = gtg(cmd, write=True)
+    return (200 if rc == 0 else 400), envelope(rc, out, err)
+
+
+def resume(args):
+    rc, out, err = gtg(["on"], write=True)
+    return (200 if rc == 0 else 400), envelope(rc, out, err)
+
+
+def log_sets(args):
+    args = as_dict(args)
+    text = args.get("text")
+    at = args.get("at")
+    new = args.get("new") is True
+    if not isinstance(text, str) or not text.strip():
+        return 400, {"ok": False, "output": "", "error": "text is required"}
+    if at is not None and not isinstance(at, str):
+        return 400, {"ok": False, "output": "", "error": "at must be a string"}
+    cmd = []
+    if new:
+        cmd.append("--new")
+    if isinstance(at, str) and at.strip():
+        stamp = at.strip()
+        if not stamp.startswith("@"):
+            stamp = "@" + stamp
+        cmd.append(stamp)
+    cmd.append(text)
+    rc, out, err = gtg(cmd, LOG_ENV, write=True)
+    body = envelope(rc, out, err)
+    if rc == 0:
+        return 200, body
+    # gtg turns record_batch's rc 3 into exit 1, same as a parse failure.
+    # The refusal line is what distinguishes "not logged" from "could not read".
+    if "unknown movement:" in (err or ""):
+        _status, known = list_movements({})
+        body["known"] = known.get("output") or ""
+        return 422, body
+    return 400, body
+
+
+def schema(name, description, properties, required=None):
+    spec = {"type": "object", "properties": properties}
+    if required:
+        spec["required"] = required
+    return {"name": name, "description": description, "inputSchema": spec}
+
+
+# One table, two transports. HTTP routes and MCP tools both call these.
+TOOLS = {
+    "log_sets": (
+        schema(
+            "log_sets",
+            "Log a set or a round. text is like `pull-ups x5 and dead hang 30s` "
+            "(and, ; or | between sets; a comma stays in the name). "
+            "at is when it happened, like `7:15` or `yesterday 7am`; the @ is added for you. "
+            "new=true logs a name that was just refused, as typed.",
+            {"text": {"type": "string"}, "at": {"type": "string"}, "new": {"type": "boolean"}},
+            ["text"],
+        ),
+        log_sets,
+    ),
+    "get_summary": (
+        schema(
+            "get_summary",
+            "Read the log. period is today, week, history, stats, or status. "
+            "days limits history (default 30).",
+            {"period": {"type": "string"}, "days": {"type": "integer"}},
+            ["period"],
+        ),
+        get_summary,
+    ),
+    "list_movements": (
+        schema(
+            "list_movements",
+            "Today's options plus all-time totals (`gtg options` and `gtg stats`). "
+            "There is no separate known-movement command.",
+            {},
+        ),
+        list_movements,
+    ),
+    "pause": (
+        schema(
+            "pause",
+            "Stop the nudges. for is `2h` or `3d`; leave it out for the rest of today. "
+            "reason is a short note like `sick`.",
+            {"for": {"type": "string"}, "reason": {"type": "string"}},
+        ),
+        pause,
+    ),
+    "resume": (
+        schema(
+            "resume",
+            "Turn the nudges back on.",
+            {},
+        ),
+        resume,
+    ),
+}
+
+
+def rpc_ok(req_id, result):
+    return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+
+def rpc_err(req_id, code, message):
+    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+
+
+def tool_result(payload):
+    lines = []
+    if payload.get("output"):
+        lines.append(payload["output"].rstrip("\n"))
+    if payload.get("error"):
+        lines.append(payload["error"].rstrip("\n"))
+    if payload.get("known"):
+        lines.append("known:\n" + payload["known"].rstrip("\n"))
+    return {
+        "content": [{"type": "text", "text": "\n".join(lines)}],
+        "isError": not payload.get("ok"),
+    }
+
+
+def rpc_initialize(req_id, params):
+    params = as_dict(params)
+    asked = params.get("protocolVersion")
+    version = asked if asked in PROTOCOLS else DEFAULT_PROTOCOL
+    return rpc_ok(req_id, {
+        "protocolVersion": version,
+        "capabilities": {"tools": {}},
+        "serverInfo": {"name": "gtg", "version": "1"},
+    })
+
+
+def rpc_ping(req_id, params):
+    return rpc_ok(req_id, {})
+
+
+def rpc_tools_list(req_id, params):
+    return rpc_ok(req_id, {"tools": [TOOLS[name][0] for name in TOOLS]})
+
+
+def rpc_tools_call(req_id, params):
+    params = as_dict(params)
+    name = params.get("name")
+    pair = TOOLS.get(name)
+    if pair is None:
+        return rpc_err(req_id, -32602, "unknown tool: %s" % name)
+    arguments = params.get("arguments")
+    if arguments is None:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        return rpc_err(req_id, -32602, "arguments must be an object")
+    _status, payload = pair[1](arguments)
+    return rpc_ok(req_id, tool_result(payload))
+
+
+RPC = {
+    "initialize": rpc_initialize,
+    "ping": rpc_ping,
+    "tools/list": rpc_tools_list,
+    "tools/call": rpc_tools_call,
+}
+
+
+def split_path(raw):
+    parts = urlsplit(raw)
+    path = parts.path or "/"
+    if path == "/gtg":
+        path = "/"
+    elif path.startswith("/gtg/"):
+        path = path[4:] or "/"
+    if len(path) > 1 and path.endswith("/"):
+        path = path[:-1]
+    return path, parse_qs(parts.query)
+
+
+def q_first(query, key):
+    vals = query.get(key)
+    if not vals:
+        return None
+    return vals[0]
+
+
+def needs_auth(path):
+    return path == "/mcp" or path.startswith("/api/")
+
+
+def authorized(header):
+    if not header:
+        return False
+    parts = header.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return False
+    return hmac.compare_digest(parts[1], TOKEN)
+
+
+def api_summary(query, body):
+    return get_summary({"period": q_first(query, "period"), "days": q_first(query, "days")})
+
+
+def api_movements(query, body):
+    return list_movements({})
+
+
+def api_log(query, body):
+    return log_sets(body)
+
+
+def api_off(query, body):
+    return pause(body)
+
+
+def api_on(query, body):
+    return resume(body)
+
+
+API = {
+    ("GET", "/api/summary"): api_summary,
+    ("GET", "/api/movements"): api_movements,
+    ("POST", "/api/log"): api_log,
+    ("POST", "/api/off"): api_off,
+    ("POST", "/api/on"): api_on,
+}
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write("gtg-server: " + (fmt % args) + "\n")
+
+    def do_GET(self):
+        self.route("GET")
+
+    def do_POST(self):
+        self.route("POST")
+
+    def do_PUT(self):
+        self.route("PUT")
+
+    def do_DELETE(self):
+        self.route("DELETE")
+
+    def route(self, method):
+        path, query = split_path(self.path)
+        kind, body = "EMPTY", {}
+        if method == "POST":
+            kind, body = self.read_json()
+            if kind == "TOO_BIG":
+                self.send_json(413, {"ok": False, "output": "", "error": "body too large"}, close=True)
+                return
+        if needs_auth(path) and not authorized(self.headers.get("Authorization")):
+            self.send_json(401, {"ok": False, "output": "", "error": "unauthorized"}, authenticate=True)
+            return
+        if kind == "BAD":
+            self.send_json(400, {"ok": False, "output": "", "error": "bad json"})
+            return
+        if method == "GET" and path == "/":
+            self.dashboard()
+            return
+        if method == "GET" and path == "/agent.md":
+            self.agent()
+            return
+        if method == "POST" and path == "/mcp":
+            self.mcp(body)
+            return
+        handler = API.get((method, path))
+        if handler is None:
+            self.send_json(404, {"ok": False, "output": "", "error": "not found"})
+            return
+        status, payload = handler(query, body)
+        self.send_json(status, payload)
+
+    def content_length(self):
+        raw = self.headers.get("Content-Length")
+        if raw is None or raw == "":
+            return 0
+        try:
+            n = int(raw)
+        except ValueError:
+            return None
+        if n < 0:
+            return None
+        return n
+
+    def read_json(self):
+        n = self.content_length()
+        if n is None:
+            return "BAD", None
+        if n > MAX_BODY:
+            return "TOO_BIG", None
+        raw = self.rfile.read(n) if n else b""
+        if raw == b"":
+            return "EMPTY", {}
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return "BAD", None
+        if not isinstance(data, dict):
+            return "BAD", None
+        return "OK", data
+
+    def send_json(self, status, payload, authenticate=False, close=False):
+        raw = json.dumps(payload).encode("utf-8")
+        self.send_bytes(status, raw, "application/json; charset=utf-8", authenticate, close)
+
+    def send_bytes(self, status, raw, content_type, authenticate=False, close=False):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(raw)))
+        if authenticate:
+            self.send_header("WWW-Authenticate", 'Bearer realm="gtg"')
+        if close:
+            self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def dashboard(self):
+        path = os.path.join(STATE_DIR, "history.html")
+        with WRITE_LOCK:
+            stale = (time.time() - PAGE_AT[0]) >= PAGE_TTL or not os.path.isfile(path)
+            if stale:
+                proc = subprocess.run(
+                    [PAGE, "--no-open"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=os.environ.copy(),
+                    universal_newlines=True,
+                )
+                if proc.returncode != 0 or not os.path.isfile(path):
+                    err = (proc.stderr or "").strip() or "gtg-page failed"
+                    self.send_json(500, {"ok": False, "output": proc.stdout, "error": err})
+                    return
+                PAGE_AT[0] = time.time()
+            with open(path, "rb") as fh:
+                data = fh.read()
+        self.send_bytes(200, data, "text/html; charset=utf-8")
+
+    def agent(self):
+        try:
+            with open(AGENT_MD, "rb") as fh:
+                data = fh.read()
+        except OSError as exc:
+            self.send_json(500, {"ok": False, "output": "", "error": "agent.md: %s" % exc})
+            return
+        self.send_bytes(200, data, "text/markdown; charset=utf-8")
+
+    def mcp(self, msg):
+        # read_json already required a dict. An empty body arrives as {}.
+        method = msg.get("method")
+        if not isinstance(method, str):
+            self.send_json(200, rpc_err(msg.get("id"), -32600, "invalid request"))
+            return
+        if method.startswith("notifications/"):
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        fn = RPC.get(method)
+        if fn is None:
+            self.send_json(200, rpc_err(msg.get("id"), -32601, "method not found"))
+            return
+        self.send_json(200, fn(msg.get("id"), msg.get("params")))
+
+
+class Server(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+def main():
+    global TOKEN
+    try:
+        sys.stderr.reconfigure(line_buffering=True)
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass
+    TOKEN = load_token()
+    addr = ("127.0.0.1", listen_port())
+    try:
+        httpd = Server(addr, Handler)
+    except OSError as exc:
+        die("cannot listen on %s:%s: %s" % (addr[0], addr[1], exc))
+    sys.stderr.write("gtg-server: listening on %s:%s\n" % addr)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        httpd.shutdown()
+
+
+if __name__ == "__main__":
+    main()
