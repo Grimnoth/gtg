@@ -120,14 +120,19 @@ route_ask() {
 # The dialog gave up. Phone the hour only when nothing was touched since it
 # opened and the hub still has this machine as the owner. Unreadable idle
 # does nothing: guessing "away" would ping the phone for a sensor failure.
+# `maybe_handoff force` skips that idle read. It is the failed-display path:
+# nothing was shown, so recent input is not an answer. The hub still refuses
+# unless this machine owns the hour and no set was logged since.
 maybe_handoff() {
   [ -n "$(cfg HUB)" ] || return 0
   local idle elapsed now_s url meet json resp rc route
-  idle=$(read_idle)
-  case "$idle" in ''|*[!0-9]*) return 0 ;; esac
-  now_s=$(date +%s)
-  elapsed=$(( now_s - ${DIALOG_OPENED:-now_s} ))
-  [ "$idle" -ge "$elapsed" ] || return 0
+  if [ "${1:-}" != force ]; then
+    idle=$(read_idle)
+    case "$idle" in ''|*[!0-9]*) return 0 ;; esac
+    now_s=$(date +%s)
+    elapsed=$(( now_s - ${DIALOG_OPENED:-now_s} ))
+    [ "$idle" -ge "$elapsed" ] || return 0
+  fi
   url=$(cfg HUB_URL)
   [ -n "$url" ] || return 0
   [ -s "$CONF_DIR/token" ] || return 0
@@ -535,7 +540,7 @@ or: $hint"
     # problem from being ignored, and previously both logged the same line.
     "")
       note "ERROR: dialog did not display"
-      maybe_handoff
+      maybe_handoff force
       exit 1 ;;
     "__TIMEOUT__")
       note "no answer (dismissed itself after ${DIALOG_TIMEOUT}s)"

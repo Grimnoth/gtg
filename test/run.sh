@@ -2044,7 +2044,7 @@ n=$((n + 1))
 printf '%s' "$n" >"$GTG_DIALOG_N"
 case "${GTG_DIALOG:-snooze}" in
   timeout) sleep "${GTG_DIALOG_SLEEP:-0}"; printf '__TIMEOUT__' ;;
-  empty) ;;
+  empty) sleep "${GTG_DIALOG_SLEEP:-0}" ;;
   did) printf 'Did it' ;;
   off)
     if [ "$n" -eq 1 ]; then printf 'Other...'; else printf 'off'; fi ;;
@@ -2307,6 +2307,17 @@ is "a dialog that does not display exits 1" "$rc" "1"
 is "  and says so" "$(printf '%s\n' "$out" | grep -c 'ERROR: dialog did not display')" "1"
 is "  and phones that slot once" "$(wh_n)" "1"
 is "  for this hour" "$(wh_field 0 slot)" "$(date '+%Y-%m-%dT%H')"
+
+# Idle stays 0, and the dialog was opened seconds earlier. Recent input is
+# not an answer: nothing was shown. The hour still has to reach the phone.
+route_clear
+: >"$TMP/dialog-n"
+export GTG_DIALOG=empty GTG_DIALOG_SLEEP=2 IDLE_A=0 IDLE_B=0
+rc=0
+out=$(./bin/gtg-nudge 2>&1) || rc=$?
+is "a failed dialog hands off an active user" "$rc" "1"
+is "  exactly one webhook" "$(wh_n)" "1"
+is "  for that slot" "$(wh_field 0 slot)" "$(date '+%Y-%m-%dT%H')"
 
 is "route tests never called ssh or rsync" \
   "$([ -s "$GTG_SSH_LEAK" ] && echo leak || echo clean)" "clean"
