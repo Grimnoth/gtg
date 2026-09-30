@@ -106,8 +106,9 @@ A modal picker listing the day's options, first one preselected, plus
 - One dialog records a **whole round**: `pull-ups x5 and dead hang 30s`. The
   word "and", `;` and `|` separate sets, and the round is checked in full
   before a single row is written.
-- **Snooze**, or letting it time out after 15 minutes, deliberately leaves the
-  slot unconsumed, so the next fire retries rather than skipping the hour.
+- **Snooze**, or letting it time out after 15 minutes (5 when this machine asks
+  the hub where to send it), deliberately leaves the slot unconsumed, so the
+  next fire retries rather than skipping the hour.
 
 ## Not today
 
@@ -298,12 +299,55 @@ The calendar belongs to the hub. `gtg calendar-sync` and `gtg backfill` on a
 client say so and do nothing. On the hub, `GCAL_ID=` is the writer. The setup
 is under "Direct to Google".
 
-On the mini, `./install.sh hub` installs the server and a 15-minute calendar
-sync. It does not install the nudge. `./ship` updates this Mac and then, if
-`ssh mini` works, pulls and runs that on the mini.
+On the mini, `./install.sh hub` installs the server, a 15-minute calendar
+sync, and a route job at :22 and :52. It does not install the nudge. `./ship`
+updates this Mac and then, if `ssh mini` works, pulls and runs that on the
+mini.
 
 Agents use `https://<hub>.<tailnet>.ts.net/gtg`. The token, the
 routes and the text to send are in `docs/agent.md`.
+
+## Where the nudge goes
+
+One ping per waking hour, delivered where you actually are. The laptop when a
+key or the mouse moved in the last three minutes. The phone, through the bot,
+when they did not. Never two pings for the same hour.
+
+The hour is a slot, `YYYY-MM-DDTHH`, owned by the hub in
+`~/.local/state/gtg/slots.tsv`. The first decision sticks. The one exception
+is a laptop dialog you never touched: after it gives up, if no key and no
+mouse have moved since it opened, that slot is handed to the phone. A phone
+slot never comes back to the laptop, and a slot gets at most one phone ping.
+
+Nothing is sent when a set is already logged this hour, when the nudges are
+paused, or outside `WAKE_START`..`WAKE_END`. A meeting is written on the slot
+and does not skip the nudge yet.
+
+Presence is keyboard and mouse idle, not the lock screen. An unlocked laptop
+with agents running and nobody at it is still idle, so the ping goes to the
+phone. `IDLE_PRESENT=` in the hub's `plan.txt` changes the three minutes
+(the default is 180 seconds).
+
+The laptop asks the hub over HTTP before it opens a dialog. `HUB_URL=` in
+`plan.txt` is the base the server is mounted at. The token is
+`~/.config/gtg/token`, mode 600. `install.sh` does not copy it. Once, from
+the laptop:
+
+```sh
+ssh mini 'cat ~/.config/gtg/token' > ~/.config/gtg/token && chmod 600 ~/.config/gtg/token
+```
+
+If the hub cannot be reached, the dialog shows as it always has.
+
+The phone side is a file on the hub, `~/.config/gtg/grok-webhook`, mode 600.
+Line 1 is the URL, line 2 is the key. You write it. It is never committed,
+printed, or logged. A failed send still owns the hour, so a retry cannot
+become a second ping. If the file is missing, that hour is skipped and the
+hub log says so.
+
+On the hub, `com.grimnoth.gtg.route` fires at :22 and :52. An hour nobody has
+claimed by then goes to the phone. It never sends for an hour that already
+has an owner.
 
 ## Say it
 
@@ -678,9 +722,11 @@ dialog from holding that lock forever and muting everything after it.
 
 ## Only one dialog, ever
 
-The nudge is a modal alert that dismisses itself after 15 minutes. That number
-is not arbitrary: fires are 30 minutes apart, so a dialog is always gone well
-before the next is due, and two can never share the screen.
+The nudge is a modal alert that dismisses itself after 15 minutes, or after 5
+when this machine asks the hub where to send it. That number is not arbitrary:
+fires are 30 minutes apart, so a dialog is always gone well before the next is
+due, and two can never share the screen. Five minutes also keeps a :50 give-up
+inside the hour, so an untouched dialog can still be handed to the phone.
 
 Three guards, in order:
 
@@ -952,7 +998,9 @@ than a reminder system that quietly stops reminding and takes a week to notice.
 | `~/.config/gtg/home-gateway-mac` | Written by `install.sh`. |
 | `~/.local/state/gtg/log.tsv` | The log. `iso8601 · exercise · reps · home\|away · weight · seconds`. On a client this is a mirror of the hub. |
 | `~/.local/state/gtg/outbox.tsv` | Sets the hub has not accepted yet. |
-| `~/.config/gtg/token` | Bearer token for the hub's HTTP server. `install.sh hub` creates it. |
+| `~/.config/gtg/token` | Bearer token for the hub's HTTP server. `install.sh hub` creates it. On a laptop, copy it once by hand; `install.sh` does not. |
+| `~/.config/gtg/grok-webhook` | Hub only. Line 1 the phone webhook URL, line 2 the key. Mode 600. You write it. Never committed. |
+| `~/.local/state/gtg/slots.tsv` | Hub only. Who owns each hour: `laptop`, `phone`, `handoff`, `skip`, `answered`. |
 | `~/.local/state/gtg/log.tsv.migrated` | A `gtg backfill` proposal. Yours to inspect and move, or delete. |
 | `test/run.sh` | The test suite. Runs against a scratch dir; cannot touch your log. |
 | `~/.local/state/gtg/nudge.log` | What the scheduled job did, and why it skipped. |

@@ -63,6 +63,11 @@ CALENDAR=
 # host, relative to its home directory.
 # HUB=mini
 # HUB_GTG=src/personal/gtg/bin/gtg
+# Base URL of the hub's server, including /gtg when it is mounted there.
+# The token is ~/.config/gtg/token. install.sh does not copy it.
+# HUB_URL=https://<hub>.<tailnet>.ts.net/gtg
+# Seconds of keyboard or mouse idle that still count as at the laptop.
+# IDLE_PRESENT=180
 
 # Which calendars count as "busy". Empty = all of them. All-day events are
 # always excluded, so birthdays and subscribed holidays cannot mute your day.

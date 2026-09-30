@@ -34,7 +34,7 @@ load_agent() { # LABEL SRC_PLIST [SUFFIX]
 # bar, no speech: those stay on the laptop that is in the room.
 if [ "${1:-}" = hub ]; then
   mkdir -p "$CONF_DIR" "$STATE_DIR" "$HOME/Library/LaunchAgents"
-  chmod +x "$REPO/bin/gtg" "$REPO/bin/gtg-nudge" "$REPO/bin/gtg-page" "$REPO/bin/gtg-interpret" "$REPO/bin/gtg-gcal"
+  chmod +x "$REPO/bin/gtg" "$REPO/bin/gtg-nudge" "$REPO/bin/gtg-page" "$REPO/bin/gtg-interpret" "$REPO/bin/gtg-gcal" "$REPO/bin/gtg-route"
   [ -f "$REPO/bin/gtg-server" ] && chmod +x "$REPO/bin/gtg-server"
   if [ ! -f "$CONF_DIR/plan.txt" ]; then
     cp "$REPO/plan.example.txt" "$CONF_DIR/plan.txt"
@@ -56,6 +56,9 @@ if [ "${1:-}" = hub ]; then
   [ -f "$calsync_plist" ] || { echo "missing $calsync_plist" >&2; exit 1; }
   load_agent com.grimnoth.gtg.server "$server_plist"
   load_agent com.grimnoth.gtg.calsync "$calsync_plist" " (every 15 min)"
+  route_plist="$REPO/launchd/com.grimnoth.gtg.route.plist"
+  [ -f "$route_plist" ] || { echo "missing $route_plist" >&2; exit 1; }
+  load_agent com.grimnoth.gtg.route "$route_plist" " (fires at :22 and :52)"
   echo
   echo "Done. This machine is the hub: log, calendar, server. No nudges here."
   exit 0
@@ -174,6 +177,13 @@ if ! command -v claude >/dev/null 2>&1 && ! command -v codex >/dev/null 2>&1; th
   echo "NOTE     neither claude nor codex is on PATH, so a line the parser"
   echo "         cannot read is refused rather than interpreted. That is the"
   echo "         old behaviour, not a fault. See INTERPRET= in plan.txt."
+fi
+
+if [ ! -s "$CONF_DIR/token" ]; then
+  echo
+  echo "NOTE     the hub's token is not on this machine. install.sh does not"
+  echo "         copy it. Once, from this machine:"
+  echo "         ssh mini 'cat ~/.config/gtg/token' > \"$CONF_DIR/token\" && chmod 600 \"$CONF_DIR/token\""
 fi
 
 echo

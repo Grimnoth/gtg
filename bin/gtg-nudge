@@ -12,6 +12,179 @@ set -u
 # How far ahead a meeting still counts as "starting soon".
 SOON_MINS=12
 
+# Keyboard and mouse idle, in seconds. HID only: an unlocked laptop with
+# agents running and nobody touching it still reads idle. GTG_IDLE_CMD stubs
+# the command in tests; it is a shell command, not just a program name.
+read_idle() {
+  local out
+  if [ -n "${GTG_IDLE_CMD:-}" ]; then
+    out=$(bash -c "$GTG_IDLE_CMD" 2>/dev/null || true)
+  else
+    out=$(ioreg -c IOHIDSystem 2>/dev/null \
+          | awk '/HIDIdleTime/ {print int($NF/1000000000); exit}')
+  fi
+  printf '%s' "$out" | tr -cd '0-9'
+}
+
+# One POST /api/route. ROUTE_TRY_RC is 0 with ROUTE_TRY set, 1 when the reply
+# was lost or unreadable, 2 when there is no token (that one is not retried).
+route_try() {
+  local url="$1" json="$2" rc=0 resp route
+  ROUTE_TRY=""
+  ROUTE_TRY_RC=1
+  ROUTE_SLOT=""
+  resp=$(hub_http_post "${url%/}/api/route" "$json") || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    ROUTE_TRY_RC=2
+    return 0
+  fi
+  if [ "$rc" -ne 0 ] || [ -z "$resp" ]; then
+    return 0
+  fi
+  route=$(printf '%s' "$resp" | /usr/bin/python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("route") or "")
+except Exception:
+    print("")')
+  ROUTE_SLOT=$(printf '%s' "$resp" | /usr/bin/python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("slot") or "")
+except Exception:
+    print("")')
+  case "$route" in
+    laptop|phone|handoff|skip:*)
+      ROUTE_TRY=$route
+      ROUTE_TRY_RC=0
+      ;;
+    *)
+      ROUTE_SLOT=""
+      ;;
+  esac
+}
+
+# Ask the hub which device owns this hour. Sets ROUTE_RESULT and ROUTE_SLOT.
+# phone / skip:* / handoff are noted here; the caller exits without stamping,
+# the same way a fire that shows nothing already does.
+#
+# HTTP, not ssh. ssh would be a second writer of slots.tsv. The server is the
+# only writer, and it holds its lock across the claim and the webhook.
+route_ask() {
+  ROUTE_RESULT=""
+  ROUTE_SLOT=""
+  local url token idle meet json
+  url=$(cfg HUB_URL)
+  if [ -z "$url" ]; then
+    note "ERROR: HUB is set and HUB_URL is not; showing the dialog"
+    ROUTE_RESULT=unreachable
+    return 0
+  fi
+  token="$CONF_DIR/token"
+  if [ ! -s "$token" ]; then
+    note "ERROR: no token at $token; one-time: ssh $(cfg HUB) 'cat ~/.config/gtg/token' > ~/.config/gtg/token && chmod 600 ~/.config/gtg/token"
+    ROUTE_RESULT=unreachable
+    return 0
+  fi
+  idle=$(read_idle)
+  case "$idle" in
+    ''|*[!0-9]*)
+      note "idle unreadable, assuming present"
+      idle=0 ;;
+  esac
+  meet=false
+  [ "${busy_now:-no}" = yes ] && meet=true
+  json=$(ROUTE_IDLE="$idle" ROUTE_MEETING="$meet" ROUTE_WHERE="$where" /usr/bin/python3 -c 'import json,os; print(json.dumps({"device":"laptop","idle":int(os.environ["ROUTE_IDLE"]),"meeting":os.environ["ROUTE_MEETING"]=="true","where":os.environ["ROUTE_WHERE"]}))')
+  route_try "$url" "$json"
+  # ponytail: retry the same POST once. Routing is idempotent per slot, so
+  # the second call returns the owner and sends nothing. Residual: both
+  # attempts lost after a send still double-pings. Ceiling: two lost replies.
+  # Upgrade: read the slot's owner before failing open.
+  if [ "$ROUTE_TRY_RC" -eq 1 ]; then
+    route_try "$url" "$json"
+  fi
+  if [ "$ROUTE_TRY_RC" -ne 0 ] || [ -z "$ROUTE_TRY" ]; then
+    note "routed: hub unreachable, showing the dialog"
+    ROUTE_RESULT=unreachable
+    return 0
+  fi
+  case "$ROUTE_TRY" in
+    laptop) ROUTE_RESULT=laptop ;;
+    phone)  note "routed: phone"; ROUTE_RESULT=phone ;;
+    skip:*) note "routed: skip (${ROUTE_TRY#skip:})"; ROUTE_RESULT=$ROUTE_TRY ;;
+    handoff) note "routed: handoff"; ROUTE_RESULT=handoff ;;
+    *)
+      note "routed: hub unreachable, showing the dialog"
+      ROUTE_RESULT=unreachable ;;
+  esac
+}
+
+# The dialog gave up. Phone the hour only when nothing was touched since it
+# opened and the hub still has this machine as the owner. Unreadable idle
+# does nothing: guessing "away" would ping the phone for a sensor failure.
+# `maybe_handoff force` skips that idle read. It is the failed-display path:
+# nothing was shown, so recent input is not an answer. The hub still refuses
+# unless this machine owns the hour and no set was logged since.
+maybe_handoff() {
+  [ -n "$(cfg HUB)" ] || return 0
+  local idle elapsed now_s url meet json resp rc route
+  if [ "${1:-}" != force ]; then
+    idle=$(read_idle)
+    case "$idle" in ''|*[!0-9]*) return 0 ;; esac
+    now_s=$(date +%s)
+    elapsed=$(( now_s - ${DIALOG_OPENED:-now_s} ))
+    [ "$idle" -ge "$elapsed" ] || return 0
+  fi
+  url=$(cfg HUB_URL)
+  [ -n "$url" ] || return 0
+  [ -s "$CONF_DIR/token" ] || return 0
+  meet=false
+  [ "${busy_now:-no}" = yes ] && meet=true
+  json=$(ROUTE_MEETING="$meet" ROUTE_SLOT="${ROUTE_SLOT:-}" ROUTE_WHERE="$where" /usr/bin/python3 -c 'import json,os
+body={"meeting":os.environ["ROUTE_MEETING"]=="true","where":os.environ["ROUTE_WHERE"]}
+slot=os.environ.get("ROUTE_SLOT","")
+if slot:
+    body["slot"]=slot
+print(json.dumps(body))')
+  rc=0
+  resp=$(hub_http_post "${url%/}/api/route/handoff" "$json") || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$resp" ]; then
+    note "routed: handoff failed (hub unreachable)"
+    return 0
+  fi
+  route=$(printf '%s' "$resp" | /usr/bin/python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("route") or "")
+except Exception:
+    print("")')
+  case "$route" in
+    handoff) note "routed: handoff" ;;
+    phone)   note "routed: phone" ;;
+    skip:*)  note "routed: skip (${route#skip:})" ;;
+    laptop|none) ;;
+    *) note "routed: handoff failed (hub unreachable)" ;;
+  esac
+}
+
+# Best effort. A missed "answered" row must not fail a nudge that already
+# logged the set. how is log, skip, snooze, or off.
+route_answered() {
+  [ -n "$(cfg HUB)" ] || return 0
+  local how="$1" url json resp rc
+  url=$(cfg HUB_URL)
+  [ -n "$url" ] || return 0
+  [ -s "$CONF_DIR/token" ] || return 0
+  json=$(ANSWER_HOW="$how" ROUTE_SLOT="${ROUTE_SLOT:-}" /usr/bin/python3 -c 'import json,os
+body={"how":os.environ["ANSWER_HOW"]}
+slot=os.environ.get("ROUTE_SLOT","")
+if slot:
+    body["slot"]=slot
+print(json.dumps(body))')
+  rc=0
+  resp=$(hub_http_post "${url%/}/api/route/answered" "$json") || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$resp" ]; then
+    note "routed: answered not recorded (hub unreachable)"
+  fi
+}
+
 # note() lives in gtg-lib.sh: `gtg note` writes the same shape of line.
 
 [ -r "$PLAN" ] || { note "FATAL: no plan file at $PLAN"; exit 1; }
@@ -72,7 +245,11 @@ where=$(where_am_i)
 # all-day meeting and silently mute the entire day.
 busy_now=no
 starts_soon=no
-ical=$(command -v icalBuddy 2>/dev/null || true)
+if [ -n "${GTG_ICAL+x}" ]; then
+  ical=$GTG_ICAL
+else
+  ical=$(command -v icalBuddy 2>/dev/null || true)
+fi
 if [ -n "$ical" ]; then
   args=(-nc -nrd -ea -b "" -iep "title,attendees")
   inc=$(cfg BUSY_CALENDARS)
@@ -144,12 +321,30 @@ if [ -n "$ical" ]; then
   fi
 fi
 
+# The hub decides the channel before the Hammerspoon probe below, which can
+# take 8s. A :20 claim has to land before the :22 phone job. Debounce, the
+# waking window and a local pause already returned, so a quiet fire never
+# claims the hour.
+if [ -n "$(cfg HUB)" ]; then
+  route_ask
+  case "$ROUTE_RESULT" in
+    phone|handoff|skip:*) exit 0 ;;
+  esac
+fi
+
 if [ "$busy_now" = yes ]; then
   # Deliberately does NOT stamp. Leaving the slot unburned means the next fire,
   # 30 minutes later, catches Ben the moment the meeting ends rather than
   # idling for a full hour.
-  note "skip: in a meeting ($(printf '%s' "$out" | head -1))"
-  exit 0
+  #
+  # A laptop claim still shows the dialog. Exiting here would own the hour
+  # with no handoff, and the phone job would not send either. The meeting is
+  # recorded on the slot; it does not skip the nudge yet. With no hub, or
+  # with the hub unreachable, today's suppression stands.
+  if [ -z "$(cfg HUB)" ] || [ "${ROUTE_RESULT:-}" != laptop ]; then
+    note "skip: in a meeting ($(printf '%s' "$out" | head -1))"
+    exit 0
+  fi
 fi
 
 # --- 6. what to do ----------------------------------------------------------
@@ -172,8 +367,13 @@ speak=$(cfg SPEAK)
 
 # 15 min, then the dialog dismisses ITSELF and the slot retries. Kept well
 # under the 30 min gap between fires, so a dialog is always gone before the
-# next one is due and two can never share the screen.
-DIALOG_TIMEOUT=$(cfg DIALOG_TIMEOUT); DIALOG_TIMEOUT=${DIALOG_TIMEOUT:-900}
+# next one is due and two can never share the screen. Five minutes when this
+# machine asks the hub: a :50 give-up still lands inside the hour, so the
+# handoff can reach the phone. An explicit DIALOG_TIMEOUT in the plan wins.
+DIALOG_TIMEOUT=$(cfg DIALOG_TIMEOUT)
+if [ -z "$DIALOG_TIMEOUT" ]; then
+  if [ -n "$(cfg HUB)" ]; then DIALOG_TIMEOUT=300; else DIALOG_TIMEOUT=900; fi
+fi
 
 # --- what is on screen: observed, written down, not yet acted on ------------
 # The calendar check above never fired once in its first three weeks, and the
@@ -184,8 +384,12 @@ DIALOG_TIMEOUT=$(cfg DIALOG_TIMEOUT); DIALOG_TIMEOUT=${DIALOG_TIMEOUT:-900}
 #
 # Fails open three ways: no hs binary, hs not answering within the deadline,
 # or any error at all. The nudge fires regardless, with "seen:" saying why.
-HS=$(command -v hs 2>/dev/null || true)
-[ -n "$HS" ] || [ ! -x /opt/homebrew/bin/hs ] || HS=/opt/homebrew/bin/hs
+if [ -n "${GTG_HS+x}" ]; then
+  HS=$GTG_HS
+else
+  HS=$(command -v hs 2>/dev/null || true)
+  [ -n "$HS" ] || [ ! -x /opt/homebrew/bin/hs ] || HS=/opt/homebrew/bin/hs
+fi
 seen="hs not installed"
 if [ -n "$HS" ]; then
   seen_out=$(mktemp)
@@ -260,9 +464,10 @@ fi
 # Every dialog below now carries its own `giving up after`, so macOS dismisses
 # them and there is nothing left to reap.
 osa() {
-  local out pid
+  local out pid bin
+  bin=${GTG_OSASCRIPT:-/usr/bin/osascript}
   out=$(mktemp)
-  /usr/bin/osascript >"$out" 2>/dev/null <<<"$1" &
+  "$bin" >"$out" 2>/dev/null <<<"$1" &
   pid=$!
   printf '%s' "$pid" >"$DIALOG_PID"
   wait "$pid" 2>/dev/null || true
@@ -313,7 +518,7 @@ osa() {
 if [ "$style" = banner ]; then
   # Kept for reference only. See the note above: on this Mac it very likely
   # shows nothing at all.
-  /usr/bin/osascript -e "display notification \"$(esc "$line")\" \
+  "${GTG_OSASCRIPT:-/usr/bin/osascript}" -e "display notification \"$(esc "$line")\" \
      with title \"$(esc "$title")\" sound name \"Ping\"" 2>/dev/null || true
 else
   # Name the next couple of alternatives in the message, so what else is due
@@ -327,14 +532,24 @@ else
 or: $hint"
   fi
 
+  DIALOG_OPENED=$(date +%s)
   answer=$(osa "$(alert_for "$msg")")
 
   case "$answer" in
     # Empty now means the dialog FAILED TO DISPLAY, which is a different
     # problem from being ignored, and previously both logged the same line.
-    "")               note "ERROR: dialog did not display"; exit 1 ;;
-    "__TIMEOUT__")    note "no answer (dismissed itself after ${DIALOG_TIMEOUT}s)"; exit 0 ;;
-    "Snooze")         note "snoozed"; exit 0 ;;                # unstamped, retries
+    "")
+      note "ERROR: dialog did not display"
+      maybe_handoff force
+      exit 1 ;;
+    "__TIMEOUT__")
+      note "no answer (dismissed itself after ${DIALOG_TIMEOUT}s)"
+      maybe_handoff
+      exit 0 ;;
+    "Snooze")
+      note "snoozed"
+      route_answered snooze
+      exit 0 ;;                # unstamped, retries
     "Other...")
       typed=$(osa "$(other_for "$line")")
       case "$typed" in
@@ -354,6 +569,7 @@ or: $hint"
         pause_set "$ends" "$PAUSE_REASON"
         note "paused until $(pause_human "$ends")${PAUSE_REASON:+ ($PAUSE_REASON)}"
         hub_forward_off
+        route_answered off
         exit 0
       fi
 
@@ -397,6 +613,7 @@ or: $hint"
           rm -f "$err"
           line=$(printf '%s' "$out" | paste -sd';' -)
           note "logged${GTG_NEW:+ (new movement)}${reading:+ (read as: $reading)}: $line"
+          ANSWERED_HOW=log
           break
         fi
         unknown=$(sed -n 's/^unknown movement: //p' "$err" | head -1); rm -f "$err"
@@ -424,10 +641,14 @@ or: $hint"
       # than glued onto the movement name.
       line=$(record_option "$line" "$where")
       note "logged: $line"
+      ANSWERED_HOW=log
       ;;
   esac
 fi
 
 # --- 8. stamp ---------------------------------------------------------------
+if [ -n "${ANSWERED_HOW:-}" ]; then
+  route_answered "$ANSWERED_HOW"
+fi
 printf '%s' "$now" >"$STAMP"
 note "nudged ($where): $line"
