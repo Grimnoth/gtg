@@ -234,7 +234,7 @@ fi
 
 code=$(curl -s -o "$TMP/agent" -w '%{http_code}' --max-time 15 "$BASE/agent.md")
 is "agent.md is 200 without a token" "$code" "200"
-if grep -q 'bens-mac-mini.tail31869b.ts.net/gtg' "$TMP/agent"; then
+if grep -qF '<hub>.<tailnet>.ts.net/gtg' "$TMP/agent"; then
   ok "  agent.md names the hub"
 else
   bad "  agent.md names the hub" "$(head -c 120 "$TMP/agent")" "the tailnet base url"

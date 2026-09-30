@@ -25,7 +25,7 @@ An hourly nudge to do a grease-the-groove set, and a one-word way to log it.
 
 The nudge is launchd and osascript: two short shell scripts and a plist. The
 log and the calendar live on the Mac mini, which also serves
-`https://bens-mac-mini.tail31869b.ts.net/gtg` so an agent can log a set from
+`https://<hub>.<tailnet>.ts.net/gtg` so an agent can log a set from
 anywhere on the tailnet. See "The hub".
 
 ## Install
@@ -274,7 +274,7 @@ On the mini, `./install.sh hub` installs the server and a 15-minute calendar
 sync. It does not install the nudge. `./ship` updates this Mac and then, if
 `ssh mini` works, pulls and runs that on the mini.
 
-Agents use `https://bens-mac-mini.tail31869b.ts.net/gtg`. The token, the
+Agents use `https://<hub>.<tailnet>.ts.net/gtg`. The token, the
 routes and the text to send are in `docs/agent.md`.
 
 ## Say it

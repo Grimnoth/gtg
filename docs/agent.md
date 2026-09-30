@@ -2,7 +2,7 @@
 
 The set log lives on the Mac mini. Log a set here. Do not keep a second copy.
 
-Base URL: `https://bens-mac-mini.tail31869b.ts.net/gtg`
+Base URL: `https://<hub>.<tailnet>.ts.net/gtg`
 
 Send this header on every `/api` and `/mcp` request:
 
@@ -15,7 +15,7 @@ The token is the contents of `~/.config/gtg/token` on the mini. The dashboard (`
 Set `BASE` and `TOKEN`, then use the examples below.
 
 ```sh
-BASE=https://bens-mac-mini.tail31869b.ts.net/gtg
+BASE=https://<hub>.<tailnet>.ts.net/gtg
 TOKEN=the-token-from-the-mini
 ```
 
@@ -93,6 +93,6 @@ curl -s -X POST "$BASE/api/on" \
 
 ## MCP
 
-URL: `https://bens-mac-mini.tail31869b.ts.net/gtg/mcp`
+URL: `https://<hub>.<tailnet>.ts.net/gtg/mcp`
 
 Same bearer token. One JSON response per request, no event stream. Tools: `log_sets`, `get_summary`, `list_movements`, `pause`, `resume`. They do the same work as the routes above, including the 422 retry: a refused `log_sets` comes back with `isError` true and the known names in the text.
