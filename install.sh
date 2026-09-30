@@ -9,6 +9,58 @@ SHIM="$HOME/.local/bin/gtg"
 LABEL="com.grimnoth.gtg"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
+# bootout returns at once, but a job with a live process (an open nudge
+# dialog, a request the server is still answering) stays registered until
+# launchd has killed it, up to its 20s exit timeout. A bootstrap inside that
+# window fails with "5: Input/output error", and the job is simply gone: no
+# nudges, nothing in the log. That is how a ./ship at 11:20 on 2026-09-22
+# silenced every nudge after it. Measured with a throwaway job before trusting
+# this: registered for 5s of a 5s timeout, then the bootstrap went through.
+load_agent() { # LABEL SRC_PLIST [SUFFIX]
+  local label="$1" src="$2" suffix="${3:-}"
+  local dest="$HOME/Library/LaunchAgents/$label.plist"
+  sed "s|__HOME__|$HOME|g" "$src" >"$dest"
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+  local _
+  for _ in $(seq 1 30); do
+    launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 || break
+    sleep 1
+  done
+  launchctl bootstrap "gui/$(id -u)" "$dest"
+  echo "loaded   $label$suffix"
+}
+
+# The mini. Log, calendar, token, server, calendar sync. No nudge, no menu
+# bar, no speech: those stay on the laptop that is in the room.
+if [ "${1:-}" = hub ]; then
+  mkdir -p "$CONF_DIR" "$STATE_DIR" "$HOME/Library/LaunchAgents"
+  chmod +x "$REPO/bin/gtg" "$REPO/bin/gtg-nudge" "$REPO/bin/gtg-page" "$REPO/bin/gtg-interpret"
+  [ -f "$REPO/bin/gtg-server" ] && chmod +x "$REPO/bin/gtg-server"
+  if [ ! -f "$CONF_DIR/plan.txt" ]; then
+    cp "$REPO/plan.example.txt" "$CONF_DIR/plan.txt"
+    echo "seeded   $CONF_DIR/plan.txt"
+  else
+    echo "kept     $CONF_DIR/plan.txt (already yours)"
+  fi
+  token="$CONF_DIR/token"
+  if [ ! -f "$token" ]; then
+    ( umask 077; openssl rand -hex 24 >"$token" )
+    echo "created  $token"
+  else
+    echo "kept     $token"
+  fi
+  chmod 600 "$token"
+  server_plist="$REPO/launchd/com.grimnoth.gtg.server.plist"
+  calsync_plist="$REPO/launchd/com.grimnoth.gtg.calsync.plist"
+  [ -f "$server_plist" ] || { echo "missing $server_plist" >&2; exit 1; }
+  [ -f "$calsync_plist" ] || { echo "missing $calsync_plist" >&2; exit 1; }
+  load_agent com.grimnoth.gtg.server "$server_plist"
+  load_agent com.grimnoth.gtg.calsync "$calsync_plist" " (every 15 min)"
+  echo
+  echo "Done. This machine is the hub: log, calendar, server. No nudges here."
+  exit 0
+fi
+
 mkdir -p "$CONF_DIR" "$STATE_DIR" "$HOME/.local/bin" "$HOME/Library/LaunchAgents"
 chmod +x "$REPO/bin/gtg" "$REPO/bin/gtg-nudge" "$REPO/bin/gtg-page" "$REPO/bin/gtg-interpret"
 
@@ -72,21 +124,7 @@ chmod +x "$SHIM"
 echo "linked   $SHIM"
 
 # --- launchd ----------------------------------------------------------------
-sed "s|__HOME__|$HOME|g" "$REPO/launchd/$LABEL.plist" >"$PLIST"
-launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-# bootout returns at once, but a job with a live process (an open nudge
-# dialog) stays registered until launchd has killed it, up to its 20s exit
-# timeout. A bootstrap inside that window fails with "5: Input/output error",
-# and the job is simply gone: no nudges, nothing in the log. That is how a
-# ./ship at 11:20 on 2026-09-22 silenced every nudge after it. Measured with a
-# throwaway job before trusting this: registered for 5s of a 5s timeout, then
-# the bootstrap went through.
-for _ in $(seq 1 30); do
-  launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || break
-  sleep 1
-done
-launchctl bootstrap "gui/$(id -u)" "$PLIST"
-echo "loaded   $LABEL (fires at :20 and :50)"
+load_agent "$LABEL" "$REPO/launchd/$LABEL.plist" " (fires at :20 and :50)"
 
 # --- menu bar (optional) ----------------------------------------------------
 # Hammerspoon rather than a menu bar app of its own, because it was already

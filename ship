@@ -56,4 +56,23 @@ fi
 printf '%s\n' "$out" | grep -vE '^(kept|linked|home) ' || true
 
 echo
+echo "== hub =="
+# The laptop is updated either way. A mini that is asleep or off the tailnet
+# must not fail the deploy that just landed here; say so and stop.
+host="${GTG_HUB_HOST:-mini}"
+if ssh -o BatchMode=yes -o ConnectTimeout=4 "$host" true >/dev/null 2>&1; then
+  if ! out=$(ssh -o BatchMode=yes -o ConnectTimeout=4 "$host" \
+        'cd src/personal/gtg && git pull --ff-only && ./install.sh hub' 2>&1); then
+    printf '%s\n' "$out"
+    echo
+    echo "hub deploy FAILED on $host. This Mac is updated; the hub is not." >&2
+    exit 1
+  fi
+  printf '%s\n' "$out" | grep -vE '^(kept|created|current) ' || true
+  echo "hub deployed on $host"
+else
+  echo "hub was not deployed: ssh to $host failed." >&2
+fi
+
+echo
 echo "Done. Running here, and public at https://github.com/Grimnoth/gtg"

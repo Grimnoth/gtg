@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.grimnoth.gtg.calsync</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/src/personal/gtg/bin/gtg</string>
+    <string>calendar-sync</string>
+    <string>2</string>
+  </array>
+
+  <!-- Two days, every 15 minutes. A calendar that was asleep catches up
+       without replaying the whole log. calendar-sync skips an event it
+       already wrote, so a second run is safe. -->
+  <key>StartInterval</key>
+  <integer>900</integer>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.local/state/gtg/calsync.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.local/state/gtg/calsync.log</string>
+</dict>
+</plist>

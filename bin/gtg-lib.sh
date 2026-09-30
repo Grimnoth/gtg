@@ -12,6 +12,12 @@ STAMP="$STATE_DIR/last-nudge"
 LOG="$STATE_DIR/log.tsv"
 NUDGE_LOG="$STATE_DIR/nudge.log"
 PAUSE="$STATE_DIR/paused"
+# Rows the hub has not accepted yet. The local log is a mirror, written at
+# the same moment, so a menu read does not wait on the network.
+OUTBOX="$STATE_DIR/outbox.tsv"
+# `off` / `on` the hub has not confirmed. hub_pull retries it before it
+# mirrors the hub's pause, or a failed forward would be wiped on the next pull.
+PAUSE_PENDING="$STATE_DIR/pause.pending"
 
 # Where the other scripts are, taken from THIS file rather than from $0.
 #
@@ -537,21 +543,34 @@ fmt_piece() {
 # GTG_NO_PAGE suppresses the page rebuild so a batch renders once at the end
 # rather than once per movement.
 record() {
-  local ts="${GTG_AT:-$(date '+%Y-%m-%dT%H:%M:%S')}"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$ts" "$1" "$2" "$3" "${4:-}" "${5:-}" >>"$LOG"
-  # Backgrounded, with every fd closed: record() runs inside command
-  # substitutions, and a child still holding stdout keeps the caller waiting
-  # until Calendar answers, which is seven seconds. That is exactly what
-  # `[ skip ] || calendar_event ... >/dev/null &` did -- the redirect covered
-  # the inner command while the backgrounded LIST kept the pipe. Measured: a
-  # menu click took 8s to confirm. The if form redirects the child itself.
-  # GTG_NO_CALENDAR exists because the state-dir override is not enough
-  # isolation on its own. A scratch run started from a COPY of the real
-  # plan.txt inherits its CALENDAR= line, so the log lands in a throwaway file
-  # while the events land in the real Google calendar. That happened on
-  # 2026-09-22: nine test sets reached the calendar and had to be deleted by
-  # hand. Set this for any run that is not a real set.
-  if [ "$2" != skip ] && [ -z "${GTG_NO_CALENDAR:-}" ]; then
+  local ts row hub
+  ts="${GTG_AT:-$(date '+%Y-%m-%dT%H:%M:%S')}"
+  # One string, appended twice. Rebuilding the outbox row later is how an
+  # empty field would get lost, and the hub's idempotency key is these bytes.
+  row=$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$ts" "$1" "$2" "$3" "${4:-}" "${5:-}")
+  printf '%s\n' "$row" >>"$LOG"
+  hub=$(cfg HUB)
+  if [ -n "$hub" ]; then
+    printf '%s\n' "$row" >>"$OUTBOX"
+    # The hub owns the calendar. Writing it here as well would put the set
+    # on the calendar twice, once now and once when ingest lands.
+    # Backgrounded the same way as the calendar write below: record() runs
+    # inside command substitutions, and a child still holding the pipe keeps
+    # the nudge waiting on the network.
+    hub_flush </dev/null >/dev/null 2>&1 &
+  elif [ "$2" != skip ] && [ -z "${GTG_NO_CALENDAR:-}" ]; then
+    # Backgrounded, with every fd closed: record() runs inside command
+    # substitutions, and a child still holding stdout keeps the caller waiting
+    # until Calendar answers, which is seven seconds. That is exactly what
+    # `[ skip ] || calendar_event ... >/dev/null &` did -- the redirect covered
+    # the inner command while the backgrounded LIST kept the pipe. Measured: a
+    # menu click took 8s to confirm. The if form redirects the child itself.
+    # GTG_NO_CALENDAR exists because the state-dir override is not enough
+    # isolation on its own. A scratch run started from a COPY of the real
+    # plan.txt inherits its CALENDAR= line, so the log lands in a throwaway file
+    # while the events land in the real Google calendar. That happened on
+    # 2026-09-22: nine test sets reached the calendar and had to be deleted by
+    # hand. Set this for any run that is not a real set.
     calendar_event "$(fmt_piece "$1" "$2" "${4:-}" "${5:-}")" "$ts" "$3" </dev/null >/dev/null 2>&1 &
   fi
   [ -n "${GTG_NO_PAGE:-}" ] && return 0
@@ -620,6 +639,218 @@ sync_rows() {
 # Rebuild the history page. Same call record() makes, named so a batch can make
 # it once itself.
 refresh_page() { "$(dirname "$0")/gtg-page" --no-open >/dev/null 2>&1 || true; }
+
+# ssh to the hub. $1 is the host, $2 the remote command (already shell-quoted).
+# stdin is the remote command's stdin. GTG_SSH is how the suite stubs this.
+hub_ssh() {
+  local sshq=${GTG_SSH:-ssh}
+  "$sshq" -o BatchMode=yes -o ConnectTimeout=4 "$1" "$2"
+}
+
+# Run gtg on the hub. Arguments are the remote argv, quoted for its shell.
+# HUB_GTG is relative to the remote home; ssh starts there.
+hub_send() {
+  local hub path q a ssh_ok
+  hub=$(cfg HUB)
+  [ -n "$hub" ] || return 0
+  path=$(cfg HUB_GTG)
+  path=${path:-src/personal/gtg/bin/gtg}
+  q=$(printf '%q' "$path")
+  for a in "$@"; do q="$q $(printf '%q' "$a")"; done
+  hub_ssh "$hub" "$q"
+}
+
+# The body lockf runs, in a fresh shell so the lock dies with the process.
+# Do not call hub_flush from here: the lock is already held, and -t 0 would
+# treat that as "someone else is flushing" and send nothing.
+hub_flush_once() {
+  local hub path snap n
+  hub=$(cfg HUB)
+  [ -n "$hub" ] || return 0
+  [ -s "$OUTBOX" ] || return 0
+  path=$(cfg HUB_GTG)
+  path=${path:-src/personal/gtg/bin/gtg}
+  snap=$(mktemp "$STATE_DIR/.outbox.XXXXXX")
+  cp "$OUTBOX" "$snap" || { rm -f "$snap"; return 1; }
+  n=$(wc -l <"$snap" | tr -d ' ')
+  if hub_ssh "$hub" "$(printf '%q' "$path") ingest" <"$snap"; then
+    # Drop only the lines this send carried. A row appended while ssh was in
+    # flight is still in the outbox, and the next flush delivers it.
+    tail -n +"$((n + 1))" "$OUTBOX" >"$snap.rest" && mv "$snap.rest" "$OUTBOX"
+    rm -f "$snap"
+    return 0
+  fi
+  note "hub flush failed for $hub" >>"$NUDGE_LOG"
+  rm -f "$snap" "$snap.rest"
+  return 1
+}
+
+hub_flush() {
+  local rc
+  [ -n "$(cfg HUB)" ] || return 0
+  [ -s "$OUTBOX" ] || return 0
+  # ponytail: lockf -t 0 so a second flush gives up instead of queueing. Two
+  # flushes trimming the outbox by line count would drop a row that arrived
+  # between them. A duplicate send is harmless (ingest skips an exact line);
+  # the one that lost the lock leaves the outbox for the next record, pull or
+  # `gtg flush`. Ceiling: no queue. Upgrade: one long-lived drainer.
+  export GTG_STATE_DIR="$STATE_DIR" GTG_CONF_DIR="$CONF_DIR"
+  [ -n "${GTG_SSH:-}" ] && export GTG_SSH
+  /usr/bin/lockf -t 0 "$STATE_DIR/flush.lock" \
+    bash -c 'set -u; . "$1"; hub_flush_once' _ "$LIB_DIR/gtg-lib.sh"
+  rc=$?
+  [ "$rc" -eq 75 ] && return 0
+  return "$rc"
+}
+
+# Remember the command, then send it. The file survives a failed ssh so the
+# next pull can retry before it copies the hub's pause over the local one.
+hub_forward() {
+  local a
+  [ -n "$(cfg HUB)" ] || return 0
+  : >"$PAUSE_PENDING"
+  for a in "$@"; do printf '%s\n' "$a" >>"$PAUSE_PENDING"; done
+  if hub_send "$@"; then
+    rm -f "$PAUSE_PENDING"
+    return 0
+  fi
+  note "hub command failed ($*): kept local pause" >>"$NUDGE_LOG"
+  return 1
+}
+
+hub_forward_pending() {
+  local a args=()
+  [ -s "$PAUSE_PENDING" ] || return 0
+  while IFS= read -r a; do args[${#args[@]}]="$a"; done <"$PAUSE_PENDING"
+  if hub_send "${args[@]}"; then
+    rm -f "$PAUSE_PENDING"
+    return 0
+  fi
+  note "hub command failed (${args[*]}): kept local pause" >>"$NUDGE_LOG"
+  return 1
+}
+
+# PAUSE_FOR / PAUSE_REASON are what parse_pause just set.
+hub_forward_off() {
+  [ -n "$(cfg HUB)" ] || return 0
+  if [ -n "${PAUSE_FOR:-}" ] && [ -n "${PAUSE_REASON:-}" ]; then
+    hub_forward off "$PAUSE_FOR" "$PAUSE_REASON"
+  elif [ -n "${PAUSE_FOR:-}" ]; then
+    hub_forward off "$PAUSE_FOR"
+  elif [ -n "${PAUSE_REASON:-}" ]; then
+    hub_forward off "$PAUSE_REASON"
+  else
+    hub_forward off
+  fi
+}
+
+# Copy one hub file to $2. stderr goes to $3. Exit status is rsync's.
+hub_rsync() {
+  local rsyncq=${GTG_RSYNC:-rsync} sshq=${GTG_SSH:-ssh} hub
+  hub=$(cfg HUB)
+  "$rsyncq" -e "$sshq -o BatchMode=yes -o ConnectTimeout=4" --timeout=4 \
+    "$hub:$1" "$2" 2>"$3"
+}
+
+# Bring the hub's log (and pause) over the local mirror. Synchronous flush
+# first: replacing the mirror while the outbox still holds a row would drop
+# a set the hub has never seen. Quiet on purpose; `gtg pull` prints PULL_NOTE.
+hub_pull() {
+  local hub tmp err ptmp perr skip_log=0
+  hub=$(cfg HUB)
+  if [ -z "$hub" ]; then
+    PULL_NOTE="no HUB= in $PLAN"
+    return 1
+  fi
+  PULL_NOTE=""
+  # Silence the remote "ingested N" line. status and the nudge both call
+  # this, and the menu bar reads status as its own little format.
+  hub_flush >/dev/null 2>&1 || true
+  if [ -s "$OUTBOX" ]; then
+    skip_log=1
+    note "hub pull skipped: outbox still has unsent rows" >>"$NUDGE_LOG"
+    PULL_NOTE="outbox not empty; mirror kept"
+  fi
+  if [ -s "$PAUSE_PENDING" ] && ! hub_forward_pending; then
+    [ -n "$PULL_NOTE" ] || PULL_NOTE="pause not confirmed; local pause kept"
+  fi
+  if [ "$skip_log" -eq 1 ]; then
+    return 0
+  fi
+  tmp=$(mktemp "$STATE_DIR/.pull.XXXXXX")
+  err="$tmp.err"
+  if ! hub_rsync ".local/state/gtg/log.tsv" "$tmp" "$err"; then
+    note "hub pull failed for $hub: $(head -1 "$err" 2>/dev/null)" >>"$NUDGE_LOG"
+    PULL_NOTE="pull failed; mirror kept"
+    rm -f "$tmp" "$err"
+    return 1
+  fi
+  mv "$tmp" "$LOG"
+  rm -f "$err"
+  # A forward the hub has not confirmed wins over the copy. Deleting the
+  # local pause here is how a failed `gtg off` would come back on.
+  if [ -s "$PAUSE_PENDING" ]; then
+    [ -n "$PULL_NOTE" ] || PULL_NOTE="mirrored log; local pause kept"
+    return 0
+  fi
+  ptmp=$(mktemp "$STATE_DIR/.pause.XXXXXX")
+  perr="$ptmp.err"
+  if hub_rsync ".local/state/gtg/paused" "$ptmp" "$perr"; then
+    mv "$ptmp" "$PAUSE"
+    rm -f "$perr"
+    PULL_NOTE="mirrored log and pause"
+  elif grep -q "No such file" "$perr" 2>/dev/null; then
+    rm -f "$PAUSE" "$ptmp" "$perr"
+    PULL_NOTE="mirrored log; hub is not paused"
+  else
+    note "hub pause mirror failed for $hub: $(head -1 "$perr" 2>/dev/null)" >>"$NUDGE_LOG"
+    rm -f "$ptmp" "$perr"
+    PULL_NOTE="mirrored log; pause mirror failed"
+  fi
+  return 0
+}
+
+# Rows on stdin, one per line. The whole line is the idempotency key.
+# awk counts fields because `IFS=$'\t' read` collapses the empty ones, which
+# is how a timed set once became "dead hang xhome".
+ingest_rows() {
+  local line nf ts canon n=0 m=0 bad=0 reps mov where wt secs
+  while IFS= read -r line || [ -n "${line:-}" ]; do
+    line=${line%$'\r'}
+    nf=$(printf '%s' "$line" | awk -F'\t' '{print NF}')
+    ts=$(printf '%s' "$line" | awk -F'\t' '{print $1}')
+    # Round-trip, not just the shape: date -j accepts 31 Feb and rolls it
+    # forward, which would store a different day under the bytes we were sent.
+    canon=$(date -j -f '%Y-%m-%dT%H:%M:%S' "$ts" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || true)
+    if [ "$nf" -ne 6 ] \
+       || ! printf '%s' "$ts" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$' \
+       || [ "$canon" != "$ts" ]; then
+      printf 'rejected: %s\n' "$line" >&2
+      bad=$((bad + 1))
+      continue
+    fi
+    if [ -s "$LOG" ] && grep -Fxq -e "$line" "$LOG"; then
+      m=$((m + 1))
+      continue
+    fi
+    printf '%s\n' "$line" >>"$LOG"
+    n=$((n + 1))
+    reps=$(printf '%s' "$line" | awk -F'\t' '{print $3}')
+    if [ "$reps" != skip ] && [ -z "${GTG_NO_CALENDAR:-}" ]; then
+      mov=$(printf '%s' "$line" | awk -F'\t' '{print $2}')
+      where=$(printf '%s' "$line" | awk -F'\t' '{print $4}')
+      wt=$(printf '%s' "$line" | awk -F'\t' '{print $5}')
+      secs=$(printf '%s' "$line" | awk -F'\t' '{print $6}')
+      calendar_event "$(fmt_piece "$mov" "$reps" "$wt" "$secs")" "$ts" "$where" \
+        </dev/null >/dev/null 2>&1 &
+    fi
+  done
+  printf 'ingested %d, duplicate %d\n' "$n" "$m"
+  if [ -z "${GTG_NO_PAGE:-}" ] && [ "$n" -gt 0 ]; then
+    refresh_page
+  fi
+  [ "$bad" -eq 0 ]
+}
 
 # Turn how a human says a time into a log timestamp. Prints iso8601, or fails.
 #

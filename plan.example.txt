@@ -52,6 +52,12 @@ MIC=
 # own sets back as meetings. `gtg calendar-sync` backfills older rows.
 CALENDAR=
 
+# Client only. An ssh host that owns the log and the calendar. Absent means
+# this machine is the hub and writes both itself. HUB_GTG is the gtg on that
+# host, relative to its home directory.
+# HUB=mini
+# HUB_GTG=src/personal/gtg/bin/gtg
+
 # Which calendars count as "busy". Empty = all of them. All-day events are
 # always excluded, so birthdays and subscribed holidays cannot mute your day.
 BUSY_CALENDARS=
