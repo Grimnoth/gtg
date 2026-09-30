@@ -904,6 +904,7 @@ done
 base=$(basename "${src#*:}")
 from="$GTG_HUB_STATE/$base"
 if [ ! -f "$from" ]; then
+  echo "rsync(1): warning: sender has empty file list: exiting"
   echo "rsync: link_stat \"$base\" failed: No such file or directory (2)" >&2
   exit 23
 fi
@@ -1023,6 +1024,10 @@ is "  and says why" "$(printf '%s' "$out" | grep -c 'outbox')" "1"
 rm -f "$GTG_STATE_DIR/outbox.tsv" "$GTG_STATE_DIR/outbox.sending"
 ./bin/gtg pull >/dev/null
 is "pull with an empty outbox takes the hub log" "$(cat "$GTG_STATE_DIR/log.tsv")" "hub-copy"
+
+reset_client
+is "a client status still starts with where:, not rsync noise" \
+  "$(./bin/gtg status 2>/dev/null | head -1 | cut -d: -f1)" "where"
 
 reset_client
 printf 'keep-me\n' >"$GTG_STATE_DIR/log.tsv"
