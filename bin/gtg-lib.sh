@@ -751,11 +751,14 @@ hub_forward_off() {
 }
 
 # Copy one hub file to $2. stderr goes to $3. Exit status is rsync's.
+# stdout is dropped: macOS's openrsync prints "sender has empty file list"
+# there for a missing file, and it became the first line of `gtg status`,
+# which the menu bar parses.
 hub_rsync() {
   local rsyncq=${GTG_RSYNC:-rsync} sshq=${GTG_SSH:-ssh} hub
   hub=$(cfg HUB)
   "$rsyncq" -e "$sshq -o BatchMode=yes -o ConnectTimeout=4" --timeout=4 \
-    "$hub:$1" "$2" 2>"$3"
+    "$hub:$1" "$2" >/dev/null 2>"$3"
 }
 
 # Bring the hub's log (and pause) over the local mirror. Synchronous flush
