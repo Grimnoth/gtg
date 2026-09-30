@@ -239,12 +239,13 @@ if pause_active; then
 fi
 
 # --- 4. home vs away --------------------------------------------------------
-where=$(where_am_i)
+gateway=$(current_gateway_mac || true)
+where=$(where_am_i "$gateway")
 # The hub sends an away hour to the phone even at the keyboard, so it only
 # hears a location this machine actually read. No gateway, or no home list,
 # is unknown rather than away: the idle rule decides instead.
 route_where=$where
-if [ -z "$(current_gateway_mac || true)" ] || [ ! -s "$HOME_MAC_FILE" ]; then
+if [ -z "$gateway" ] || [ ! -s "$HOME_MAC_FILE" ]; then
   route_where=""
 fi
 
