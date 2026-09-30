@@ -602,15 +602,31 @@ calendar_script() {
     "$(esc "$cal")" "$(esc "$summary")" "$(esc "$summary")" "$(esc "$where")"
 }
 
-# Put one set on the calendar named by CALENDAR= in plan.txt. No name, no
-# calendar, and no Calendar.app is ever launched. calendar_event SUMMARY ISO WHERE
+# Put one set on the calendar. calendar_event SUMMARY ISO WHERE
+#
+# GCAL_ID is the hub path. Calendar.app on a headless Mac needs a signed-in
+# desktop, lags behind Google, and answers "already there?" from a stale
+# cache, which is how a sync wrote the same set twice. CALENDAR= stays the
+# laptop path: no name, no calendar, and Calendar.app is never launched.
 #
 # Calendar.app has to be running for AppleScript to reach it, so it is started
 # hidden when it is not. A failed write is written to the nudge log by name,
 # never swallowed: a calendar that quietly stops filling is the same shape as
 # a reminder that quietly stops reminding.
 calendar_event() {
-  local cal err
+  local cal gcal err
+  gcal=$(cfg GCAL_ID)
+  if [ -n "$gcal" ]; then
+    err=$(mktemp)
+    if ! GTG_GCAL_ID="$gcal" GTG_CONF_DIR="$CONF_DIR" GTG_STATE_DIR="$STATE_DIR" \
+        "$LIB_DIR/gtg-gcal" "$1" "$2" "${3:-}" >/dev/null 2>"$err"; then
+      note "calendar write failed for \"$1\" at $2: $(head -1 "$err")" >>"$NUDGE_LOG"
+      rm -f "$err"
+      return 1
+    fi
+    rm -f "$err"
+    return 0
+  fi
   cal=$(cfg CALENDAR)
   [ -n "$cal" ] || return 0
   pgrep -xq Calendar || { open -gj -a Calendar 2>/dev/null; sleep 3; }

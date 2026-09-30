@@ -16,7 +16,9 @@ for f in "$REAL_HOME/.local/state/gtg/log.tsv" \
          "$REAL_HOME/.local/state/gtg/history.html" \
          "$REAL_HOME/.local/state/gtg/last-nudge" \
          "$REAL_HOME/.config/gtg/plan.txt" \
-         "$REAL_HOME/.config/gtg/token"; do
+         "$REAL_HOME/.config/gtg/token" \
+         "$REAL_HOME/.config/gtg/gcal-key.json" \
+         "$REAL_HOME/.local/state/gtg/gcal-token.json"; do
   printf '%s\t%s\n' "$f" "$(md5 -q "$f" 2>/dev/null || echo ABSENT)" >>"$LIVE"
 done
 cleanup() {
@@ -264,7 +266,7 @@ while IFS="$(printf '\t')" read -r f want; do
   now=$(md5 -q "$f" 2>/dev/null || echo ABSENT)
   [ "$now" = "$want" ] || { mutated=$((mutated + 1)); echo "         MUTATED: $f"; }
 done <"$LIVE"
-is "live log, page, plan and token unchanged" "$mutated" "0"
+is "live log, page, plan, token, key and cache unchanged" "$mutated" "0"
 
 printf '\nserver: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

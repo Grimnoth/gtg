@@ -15,7 +15,9 @@ LIVE="$TMP/live-before"
 for f in "$REAL_HOME/.local/state/gtg/log.tsv" \
          "$REAL_HOME/.local/state/gtg/history.html" \
          "$REAL_HOME/.local/state/gtg/last-nudge" \
-         "$REAL_HOME/.config/gtg/plan.txt"; do
+         "$REAL_HOME/.config/gtg/plan.txt" \
+         "$REAL_HOME/.config/gtg/gcal-key.json" \
+         "$REAL_HOME/.local/state/gtg/gcal-token.json"; do
   printf '%s\t%s\n' "$f" "$(md5 -q "$f" 2>/dev/null || echo ABSENT)" >>"$LIVE"
 done
 
@@ -669,6 +671,9 @@ calendar_event() { printf 'called\n' >>"$TMP/cal-calls"; }
 rm -f "$TMP/cal-calls"
 printf 'CALENDAR=Pretend\n' >>"$GTG_CONF_DIR/plan.txt"
 GTG_NO_PAGE=1 record 'pull-ups' 5 home >/dev/null 2>&1
+# record() backgrounds the write. The line is there once the child runs.
+i=0
+while [ "$i" -lt 40 ] && [ ! -s "$TMP/cal-calls" ]; do sleep 0.05; i=$((i + 1)); done
 is "a plain record would write to the calendar" \
   "$(wc -l <"$TMP/cal-calls" 2>/dev/null | tr -d ' ')" "1"
 GTG_NO_PAGE=1 GTG_NO_CALENDAR=1 record 'pull-ups' 5 home >/dev/null 2>&1
@@ -1096,6 +1101,543 @@ PATH=$hub_path
 reset_plan
 rm -f "$GTG_STATE_DIR/outbox.tsv"
 
+echo "== direct to Google Calendar =="
+# The ingest block exports this so a scratch plan cannot reach a real
+# calendar. Here the calendar is a stub on 127.0.0.1, and the flag would
+# turn every write into a silent success.
+unset GTG_NO_CALENDAR
+# Calendar.app answered "already there?" from its own cache, which lagged
+# and duplicated sets. These calls must hit the stub and nothing else.
+stub_pid=""
+cleanup_suite() {
+  if [ -n "${stub_pid:-}" ]; then
+    kill "$stub_pid" 2>/dev/null || true
+    wait "$stub_pid" 2>/dev/null || true
+  fi
+  rm -rf "$TMP"
+}
+trap cleanup_suite EXIT
+
+had_tz=0
+old_tz=""
+if [ -n "${TZ+x}" ]; then had_tz=1; old_tz=$TZ; fi
+export TZ=America/New_York
+mkdir -p "$TMP/keytmp"
+export TMPDIR="$TMP/keytmp"
+export GTG_GCAL_LOG="$TMP/gcal-requests.jsonl"
+export GTG_GCAL_CONTROL="$TMP/gcal-control.json"
+export GTG_GCAL_PORT="$TMP/gcal-port"
+export GTG_GCAL_PUB="$TMP/gcal.pub"
+export GTG_GCAL_ISS="gtg-test@example.iam.gserviceaccount.com"
+: >"$GTG_GCAL_LOG"
+gcal_control() {
+  /usr/bin/python3 -c '
+import json, sys
+json.dump({
+    "insert_status": int(sys.argv[1]),
+    "events": json.loads(sys.argv[2]),
+    "ids": json.loads(sys.argv[3]),
+}, open(sys.argv[4], "w"))
+' "$1" "$2" "$3" "$GTG_GCAL_CONTROL"
+}
+gcal_n() {
+  /usr/bin/python3 -c '
+import json, sys
+op, path, summary = sys.argv[1], sys.argv[2], sys.argv[3]
+n = 0
+for line in open(path):
+    line = line.strip()
+    if not line:
+        continue
+    row = json.loads(line)
+    if row.get("op") != op:
+        continue
+    if summary and (row.get("body") or {}).get("summary") != summary:
+        continue
+    n += 1
+print(n)
+' "$1" "$GTG_GCAL_LOG" "${2:-}"
+}
+gcal_ops() {
+  /usr/bin/python3 -c '
+import json, sys
+ops = []
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line:
+        continue
+    ops.append(json.loads(line).get("op", ""))
+print(" ".join(ops))
+' "$GTG_GCAL_LOG"
+}
+gcal_field() {
+  /usr/bin/python3 -c '
+import json, sys
+summary, field, path = sys.argv[1], sys.argv[2], sys.argv[3]
+for line in open(path):
+    line = line.strip()
+    if not line:
+        continue
+    row = json.loads(line)
+    if row.get("op") != "insert":
+        continue
+    body = row.get("body") or {}
+    if body.get("summary") != summary:
+        continue
+    if field == "status":
+        print(row.get("status", ""))
+        sys.exit(0)
+    cur = body
+    for part in field.split("."):
+        if not isinstance(cur, dict):
+            cur = ""
+            break
+        cur = cur.get(part, "")
+    print(cur if cur is not None else "")
+    sys.exit(0)
+' "$1" "$2" "$GTG_GCAL_LOG"
+}
+gcal_listq() {
+  /usr/bin/python3 -c '
+import json, sys
+key, path, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+seen = 0
+for line in open(path):
+    line = line.strip()
+    if not line:
+        continue
+    row = json.loads(line)
+    if row.get("op") != "list":
+        continue
+    if seen == n:
+        print((row.get("query") or {}).get(key, ""))
+        sys.exit(0)
+    seen += 1
+' "$1" "$GTG_GCAL_LOG" "$2"
+}
+gcal_id() {
+  /usr/bin/python3 -c '
+import hashlib, sys
+raw = "%s\t%s\t%s" % (sys.argv[1], sys.argv[2], sys.argv[3])
+print("gtg" + hashlib.sha1(raw.encode("utf-8")).hexdigest())
+' "$1" "$2" "$3"
+}
+gcal_window() {
+  /usr/bin/python3 -c '
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+import sys
+iso, which = sys.argv[1], sys.argv[2]
+start = datetime.strptime(iso, "%Y-%m-%dT%H:%M:%S").replace(second=0, microsecond=0)
+start = start.replace(tzinfo=ZoneInfo("America/New_York"))
+# Same exclusive-bound adjustment as minute_bounds in bin/gtg-gcal.
+begin = start - timedelta(seconds=1)
+end = start + timedelta(seconds=60)
+print(begin.isoformat() if which == "min" else end.isoformat())
+' "$1" "$2"
+}
+gcal_call() {
+  ./bin/gtg-gcal "$1" "$2" "$3" >"$TMP/gcal.out" 2>"$TMP/gcal.err"
+  gcal_rc=$?
+  gcal_out=$(cat "$TMP/gcal.out")
+}
+sys_zone() {
+  /usr/bin/python3 -c '
+import os
+p = os.path.realpath("/etc/localtime")
+mark = "zoneinfo/"
+i = p.find(mark)
+print(p[i + len(mark):] if i >= 0 else "")
+'
+}
+
+cat >"$TMP/gcal-stub.py" <<'GCALSTUB'
+#!/usr/bin/python3
+import base64
+import json
+import os
+import subprocess
+import tempfile
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, unquote, urlparse
+from zoneinfo import ZoneInfo
+
+STORED = {}
+
+
+def aware(text, tzname):
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    dt = datetime.fromisoformat(text)
+    if dt.tzinfo is None and tzname:
+        dt = dt.replace(tzinfo=ZoneInfo(tzname))
+    return dt
+
+
+def listed(ev, time_min, time_max):
+    start = ev.get("start") if isinstance(ev, dict) else None
+    end = ev.get("end") if isinstance(ev, dict) else None
+    if not isinstance(start, dict):
+        return False
+    s = start.get("dateTime") or ""
+    e = (end or {}).get("dateTime") if isinstance(end, dict) else ""
+    e = e or s
+    if not s or not e:
+        return False
+    tzname = start.get("timeZone") or (end.get("timeZone") if isinstance(end, dict) else "") or ""
+    try:
+        start_dt = aware(s, tzname)
+        end_dt = aware(e, tzname)
+        if time_min and not (end_dt > aware(time_min, "")):
+            return False
+        if time_max and not (start_dt < aware(time_max, "")):
+            return False
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def log(obj):
+    with open(os.environ["GTG_GCAL_LOG"], "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(obj) + "\n")
+
+
+def control():
+    try:
+        with open(os.environ["GTG_GCAL_CONTROL"], "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def b64decode(seg):
+    pad = "=" * ((4 - len(seg) % 4) % 4)
+    return base64.urlsafe_b64decode(seg + pad)
+
+
+def verify_jwt(token, aud):
+    parts = token.split(".")
+    if len(parts) != 3:
+        return "not three parts"
+    try:
+        header = json.loads(b64decode(parts[0]).decode("utf-8"))
+        payload = json.loads(b64decode(parts[1]).decode("utf-8"))
+        sig = b64decode(parts[2])
+    except (ValueError, TypeError):
+        return "undecodable"
+    if not isinstance(header, dict) or header.get("alg") != "RS256":
+        return "alg"
+    signed = (parts[0] + "." + parts[1]).encode("ascii")
+    fd, sigpath = tempfile.mkstemp(prefix="gtg-stub-sig-")
+    try:
+        os.write(fd, sig)
+        os.close(fd)
+        fd = -1
+        proc = subprocess.run(
+            ["/usr/bin/openssl", "dgst", "-sha256", "-verify",
+             os.environ["GTG_GCAL_PUB"], "-signature", sigpath],
+            input=signed, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.remove(sigpath)
+        except OSError:
+            pass
+    if proc.returncode != 0:
+        return "bad signature"
+    if not isinstance(payload, dict):
+        return "payload"
+    if payload.get("iss") != os.environ["GTG_GCAL_ISS"]:
+        return "iss"
+    if payload.get("scope") != "https://www.googleapis.com/auth/calendar.events":
+        return "scope"
+    if payload.get("aud") != aud:
+        return "aud"
+    iat, exp = payload.get("iat"), payload.get("exp")
+    if iat.__class__ is not int or exp.__class__ is not int:
+        return "iat type"
+    if exp != iat + 3600:
+        return "exp"
+    return ""
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        return
+
+    def do_GET(self):
+        self.route("GET")
+
+    def do_POST(self):
+        self.route("POST")
+
+    def body_bytes(self):
+        n = int(self.headers.get("Content-Length") or "0")
+        if n <= 0:
+            return b""
+        return self.rfile.read(n)
+
+    def send_json(self, code, obj):
+        raw = json.dumps(obj).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def route(self, method):
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        raw = self.body_bytes()
+        if path == "/token" and method == "POST":
+            self.token(raw)
+            return
+        prefix = "/calendar/v3/calendars/"
+        if path.startswith(prefix) and path.endswith("/events"):
+            if method == "GET":
+                self.events_list(parsed)
+            elif method == "POST":
+                self.events_insert(raw)
+            else:
+                self.send_json(405, {"error": {"message": "method"}})
+            return
+        log({"op": "unknown", "method": method, "path": path})
+        self.send_json(404, {"error": {"message": "not found"}})
+
+    def token(self, raw):
+        form = parse_qs(raw.decode("utf-8"))
+        assertion = (form.get("assertion") or [""])[0]
+        grant = (form.get("grant_type") or [""])[0]
+        host, port = self.server.server_address
+        aud = "http://%s:%s/token" % (host, port)
+        if grant != "urn:ietf:params:oauth:grant-type:jwt-bearer":
+            log({"op": "token", "ok": False, "why": "grant"})
+            self.send_json(400, {"error": "unsupported_grant_type"})
+            return
+        why = verify_jwt(assertion, aud)
+        if why:
+            log({"op": "token", "ok": False, "why": why})
+            self.send_json(401, {"error": "invalid_grant", "error_description": why})
+            return
+        log({"op": "token", "ok": True})
+        self.send_json(200, {
+            "access_token": "ya29.gtg-stub-token",
+            "expires_in": 3600,
+            "token_type": "Bearer",
+        })
+
+    def events_list(self, parsed):
+        flat = {}
+        for key, vals in parse_qs(parsed.query).items():
+            flat[key] = vals[0] if vals else ""
+        log({"op": "list", "query": flat})
+        cfg = control()
+        items = list(cfg.get("events") or [])
+        items.extend(STORED.values())
+        # Google's timeMin is exclusive on the event end, timeMax exclusive
+        # on the event start. A zero-minute event is invisible if timeMin
+        # sits on its start.
+        items = [ev for ev in items if listed(ev, flat.get("timeMin", ""), flat.get("timeMax", ""))]
+        self.send_json(200, {"items": items})
+
+    def events_insert(self, raw):
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        cfg = control()
+        try:
+            status = int(cfg.get("insert_status") or 200)
+        except (TypeError, ValueError):
+            status = 200
+        eid = body.get("id") or ""
+        known = set(cfg.get("ids") or [])
+        known.update(STORED.keys())
+        if status >= 400 and status != 409:
+            log({"op": "insert", "status": status, "body": body})
+            self.send_json(status, {"error": {"code": status, "message": "stub broke"}})
+            return
+        if eid in known:
+            log({"op": "insert", "status": 409, "body": body})
+            self.send_json(409, {"error": {
+                "code": 409,
+                "message": "The requested identifier already exists.",
+            }})
+            return
+        STORED[eid] = body
+        log({"op": "insert", "status": 200, "body": body})
+        self.send_json(200, body)
+
+
+def main():
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    with open(os.environ["GTG_GCAL_PORT"], "w", encoding="utf-8") as fh:
+        fh.write(str(server.server_address[1]))
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
+GCALSTUB
+
+gcal_control 200 '[]' '[]'
+openssl genrsa -out "$TMP/gcal.pkcs1" 2048 2>/dev/null
+openssl pkcs8 -topk8 -nocrypt -in "$TMP/gcal.pkcs1" -out "$TMP/gcal.key"
+openssl rsa -in "$TMP/gcal.key" -pubout -out "$TMP/gcal.pub" 2>/dev/null
+/usr/bin/python3 "$TMP/gcal-stub.py" >"$TMP/gcal-stub.out" 2>"$TMP/gcal-stub.err" &
+stub_pid=$!
+i=0
+while [ ! -s "$TMP/gcal-port" ]; do
+  if ! kill -0 "$stub_pid" 2>/dev/null; then
+    break
+  fi
+  i=$((i + 1))
+  [ "$i" -gt 50 ] && break
+  sleep 0.05
+done
+port=$(cat "$TMP/gcal-port" 2>/dev/null || true)
+if [ -z "$port" ]; then
+  bad "gcal stub started" "$(head -1 "$TMP/gcal-stub.err" 2>/dev/null)" "a port"
+else
+  ok "gcal stub started"
+  export GTG_GCAL_API="http://127.0.0.1:$port/calendar/v3"
+  export GTG_GCAL_ID=gtg-test
+  /usr/bin/python3 -c '
+import json, sys
+pem = open(sys.argv[1], encoding="utf-8").read()
+json.dump({
+    "type": "service_account",
+    "client_email": "gtg-test@example.iam.gserviceaccount.com",
+    "private_key": pem,
+    "token_uri": sys.argv[2],
+}, open(sys.argv[3], "w", encoding="utf-8"))
+' "$TMP/gcal.key" "http://127.0.0.1:$port/token" "$GTG_CONF_DIR/gcal-key.json"
+  chmod 600 "$GTG_CONF_DIR/gcal-key.json"
+  reset_plan
+  printf 'GCAL_ID=gtg-test\n' >>"$GTG_CONF_DIR/plan.txt"
+
+  summary="pull-ups x5"
+  iso="2026-09-03T11:52:00"
+  where="home"
+  eid=$(gcal_id "$summary" "$iso" "$where")
+  old_umask=$(umask)
+  umask 000
+  gcal_call "$summary" "$iso" "$where"
+  umask "$old_umask"
+  is "a set is written" "$gcal_rc" "0"
+  is "  and says so" "$gcal_out" "written"
+  is "  success stays off stderr" "$(cat "$TMP/gcal.err")" ""
+  is "  under the deterministic id" "$(gcal_field "$summary" id)" "$eid"
+  is "  with the summary" "$(gcal_field "$summary" summary)" "$summary"
+  is "  at the set's own time" "$(gcal_field "$summary" start.dateTime)" "$iso"
+  is "  and the end is the same instant" "$(gcal_field "$summary" end.dateTime)" "$iso"
+  is "  in the zone TZ names" "$(gcal_field "$summary" start.timeZone)" "America/New_York"
+  is "  on both ends" "$(gcal_field "$summary" end.timeZone)" "America/New_York"
+  is "  location is where it happened" "$(gcal_field "$summary" location)" "$where"
+  is "  description matches the AppleScript event" "$(gcal_field "$summary" description)" "$where"
+  is "list covers that minute" "$(gcal_listq timeMin 0)" "$(gcal_window "$iso" min)"
+  is "  and the next 60 seconds" "$(gcal_listq timeMax 0)" "$(gcal_window "$iso" max)"
+  is "  as single events" "$(gcal_listq singleEvents 0)" "true"
+  is "the private key is not left on disk" "$(ls -A "$TMP/keytmp" | wc -l | tr -d ' ')" "0"
+  is "the token cache is mode 0600" "$(stat -f %Lp "$GTG_STATE_DIR/gcal-token.json" 2>/dev/null || echo missing)" "600"
+  is "stderr never contains the token" "$(grep -c 'ya29' "$TMP/gcal.err" || true)" "0"
+  is "  or the private key" "$(grep -c 'PRIVATE KEY' "$TMP/gcal.err" || true)" "0"
+
+  gcal_call "$summary" "$iso" "$where"
+  is "the same set again exits 0" "$gcal_rc" "0"
+  is "  says it already exists" "$gcal_out" "exists"
+  is "  and does not insert again" "$(gcal_n insert "$summary")" "1"
+  is "  reusing the cached token" "$(gcal_ops)" "token list insert list"
+
+  exp_soon=$(/usr/bin/python3 -c 'import time; print(int(time.time()) + 30)')
+  printf '{"access_token":"ya29.stale","expiry":%s}\n' "$exp_soon" \
+    >"$GTG_STATE_DIR/gcal-token.json"
+  chmod 600 "$GTG_STATE_DIR/gcal-token.json"
+  gcal_call "$summary" "$iso" "$where"
+  is "a token inside 60s of expiry is refreshed" "$(gcal_n token)" "2"
+
+  gcal_control 200 '[{"id":"randomappleid","summary":"dead hang 30s","start":{"dateTime":"2026-09-03T08:15:00","timeZone":"America/New_York"},"end":{"dateTime":"2026-09-03T08:15:00","timeZone":"America/New_York"}}]' '[]'
+  gcal_call "dead hang 30s" "2026-09-03T08:15:00" "away"
+  is "a random-id event with the same summary is a skip" "$gcal_rc" "0"
+  is "  reported as already there" "$gcal_out" "exists"
+  is "  and nothing is inserted for it" "$(gcal_n insert "dead hang 30s")" "0"
+
+  summary3="push-ups x20"
+  iso3="2026-09-03T09:00:00"
+  where3="home"
+  eid3=$(gcal_id "$summary3" "$iso3" "$where3")
+  gcal_control 200 '[]' "[\"$eid3\"]"
+  : >"$GTG_STATE_DIR/nudge.log"
+  gcal_call "$summary3" "$iso3" "$where3"
+  is "an insert conflict is success" "$gcal_rc" "0"
+  is "  and says exists" "$gcal_out" "exists"
+  is "  after the insert came back 409" "$(gcal_field "$summary3" status)" "409"
+  calendar_event "$summary3" "$iso3" "$where3"
+  is "  calendar_event treats 409 as written" "$?" "0"
+  is "  with no failure note" "$(grep -c 'calendar write failed' "$GTG_STATE_DIR/nudge.log" || true)" "0"
+
+  unset TZ
+  zone=$(sys_zone)
+  gcal_control 200 '[]' '[]'
+  gcal_call "stairs, 2 flights" "2026-09-04T06:00:00" "away"
+  is "with TZ unset the zone is /etc/localtime" \
+    "$(gcal_field "stairs, 2 flights" start.timeZone)" "$zone"
+  export TZ=America/New_York
+
+  summary4="farmer walk 1 min"
+  iso4="2026-09-03T10:00:00"
+  where4="home"
+  gcal_control 500 '[]' '[]'
+  gcal_call "$summary4" "$iso4" "$where4"
+  is "a 500 is a failure" "$gcal_rc" "1"
+  is "  named by status and Google's message" "$(cat "$TMP/gcal.err")" "500 stub broke"
+  is "  on one line" "$(wc -l <"$TMP/gcal.err" | tr -d ' ')" "1"
+  is "  and the token is not in it" "$(grep -c 'ya29' "$TMP/gcal.err" || true)" "0"
+  is "  nor the key" "$(grep -c 'PRIVATE KEY' "$TMP/gcal.err" || true)" "0"
+  : >"$GTG_STATE_DIR/nudge.log"
+  calendar_event "$summary4" "$iso4" "$where4"
+  is "calendar_event records the failed write" "$?" "1"
+  is "  in the nudge log" "$(grep -c 'calendar write failed' "$GTG_STATE_DIR/nudge.log")" "1"
+  is "  with the status" "$(grep -c '500 stub broke' "$GTG_STATE_DIR/nudge.log")" "1"
+  is "  and still no token" "$(grep -c 'ya29' "$GTG_STATE_DIR/nudge.log" || true)" "0"
+  is "the key file was not copied into the private-key dir" \
+    "$(ls -A "$TMP/keytmp" | wc -l | tr -d ' ')" "0"
+
+  gcal_control 200 '[]' '[]'
+  reset_plan
+  printf 'GCAL_ID=gtg-test\n' >>"$GTG_CONF_DIR/plan.txt"
+  day=$(TZ=America/New_York date '+%Y-%m-%dT12:34:56')
+  printf '%s\tring dips\t5\thome\t\t\n' "$day" >>"$GTG_STATE_DIR/log.tsv"
+  out=$(./bin/gtg calendar-sync 2>"$TMP/e")
+  rc=$?
+  is "calendar-sync runs with GCAL_ID and no CALENDAR" "$rc" "0"
+  is "  and prints the calendar id" \
+    "$(printf '%s\n' "$out" | grep -c '1 set(s) on calendar "gtg-test"')" "1"
+  is "  by inserting that set" "$(gcal_n insert "ring dips x5")" "1"
+  out=$(./bin/gtg calendar-sync 2>"$TMP/e")
+  rc=$?
+  is "a second calendar-sync is idempotent" "$rc" "0"
+  is "  and still counts the set" \
+    "$(printf '%s\n' "$out" | grep -c '1 set(s) on calendar "gtg-test"')" "1"
+  is "  without inserting it again" "$(gcal_n insert "ring dips x5")" "1"
+fi
+
+if [ -n "${stub_pid:-}" ]; then
+  kill "$stub_pid" 2>/dev/null || true
+  wait "$stub_pid" 2>/dev/null || true
+  stub_pid=""
+fi
+unset GTG_GCAL_API GTG_GCAL_ID GTG_GCAL_LOG GTG_GCAL_CONTROL GTG_GCAL_PORT GTG_GCAL_PUB GTG_GCAL_ISS TMPDIR
+if [ "$had_tz" -eq 1 ]; then export TZ="$old_tz"; else unset TZ; fi
+reset_plan
+
 echo "== isolation: nothing live was touched =="
 # Content comparison, not mtime: an mtime threshold moves whenever the suite
 # creates a file, which can hide a write that happened before it.
@@ -1104,7 +1646,23 @@ while IFS=$'\t' read -r f want; do
   now=$(md5 -q "$f" 2>/dev/null || echo ABSENT)
   [ "$now" = "$want" ] || { mutated=$((mutated+1)); echo "         MUTATED: $f"; }
 done <"$LIVE"
-is "live log, page, stamp and plan all unchanged" "$mutated" "0"
+is "live log, page, stamp, plan, key and token all unchanged" "$mutated" "0"
+
+# 03:00 on the spring-forward morning: one second earlier does not exist in
+# local time, and a window built there came out backwards.
+dst_ok() {
+  /usr/bin/python3 - "$REPO/bin/gtg-gcal" "$1" <<'PY'
+import sys, importlib.machinery, importlib.util
+from datetime import datetime
+loader = importlib.machinery.SourceFileLoader("gcal", sys.argv[1])
+spec = importlib.util.spec_from_loader("gcal", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+b, e = m.minute_bounds(sys.argv[2], "America/New_York")
+print("ordered" if datetime.fromisoformat(b) < datetime.fromisoformat(e) else "backwards")
+PY
+}
+is "the list window is ordered at spring-forward 03:00" "$(dst_ok 2026-03-08T03:00:00)" "ordered"
+is "  and at fall-back 01:30" "$(dst_ok 2026-11-01T01:30:00)" "ordered"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 bash test/server.sh && [ "$fail" -eq 0 ]
