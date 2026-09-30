@@ -801,4 +801,4 @@ done <"$LIVE"
 is "live log, page, stamp and plan all unchanged" "$mutated" "0"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
-[ "$fail" -eq 0 ]
+bash test/server.sh && [ "$fail" -eq 0 ]
