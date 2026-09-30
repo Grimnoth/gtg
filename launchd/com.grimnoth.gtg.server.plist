@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.grimnoth.gtg.server</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/src/personal/gtg/bin/gtg-server</string>
+  </array>
+
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- A missing token exits on purpose. KeepAlive starts it again, so
+       server.log fills with that refusal until the token file exists.
+       An open hub is worse than a loud one. -->
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.local/state/gtg/server.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.local/state/gtg/server.log</string>
+</dict>
+</plist>

@@ -47,6 +47,13 @@ fi
 # time, and it expires by itself -- see pause_active in gtg-lib.sh. The line
 # is logged like every other decision, and `gtg fires` counts these apart from
 # the nudges that were ignored: a quiet day chosen is not a day of refusals.
+#
+# The pause file is the hub's when HUB= is set. Pull before reading it, or a
+# pause made on the mini is invisible and this fire talks over it. Same pull
+# refreshes the log before today's options are chosen.
+if [ -n "$(cfg HUB)" ]; then
+  hub_pull || true
+fi
 if pause_active; then
   note "skip: paused until $(pause_human "$PAUSE_UNTIL")${PAUSE_WHY:+ ($PAUSE_WHY)}"
   exit 0
@@ -346,6 +353,7 @@ or: $hint"
         if ! ends=$(pause_ends "$PAUSE_FOR"); then ends=$(pause_ends); fi
         pause_set "$ends" "$PAUSE_REASON"
         note "paused until $(pause_human "$ends")${PAUSE_REASON:+ ($PAUSE_REASON)}"
+        hub_forward_off
         exit 0
       fi
 

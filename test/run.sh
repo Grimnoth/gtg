@@ -790,6 +790,307 @@ done
 ./bin/gtg history 30 >/dev/null 2>&1 && ok "gtg history 30" || bad "gtg history 30" "nonzero" "0"
 ./bin/gtg-page --no-open >/dev/null 2>&1 && ok "gtg-page" || bad "gtg-page" "nonzero" "0"
 
+echo "== hub ingest =="
+# The hub takes rows on stdin and the whole line is the idempotency key.
+# A timed set has empty reps and empty weight; IFS=$'\t' read collapses those
+# and once slid "home" into the reps column. This must not.
+export GTG_NO_CALENDAR=1 GTG_NO_PAGE=1
+reset_plan
+hang=$'2026-09-01T10:00:00\tdead hang\t\thome\t\t30'
+pulls=$'2026-09-01T10:05:00\tpull-ups\t5\thome\t\t'
+out=$(printf '%s\n%s\n%s\n' "$hang" "$pulls" "$hang" | ./bin/gtg ingest 2>"$TMP/e")
+is "ingest rc" "$?" "0"
+is "ingest counts new and duplicate" "$out" "ingested 2, duplicate 1"
+is "  two rows kept" "$(rows)" "2"
+is "  a timed set keeps its empty fields" \
+  "$(awk -F'\t' 'NR==1{printf "%s[%s][%s][%s][%s]", NF, $3, $4, $5, $6}' "$GTG_STATE_DIR/log.tsv")" \
+  "6[][home][][30]"
+is "  and the bytes are the line we sent" \
+  "$(head -1 "$GTG_STATE_DIR/log.tsv")" "$hang"
+
+out=$(printf '%s\n' "$pulls" | ./bin/gtg ingest 2>"$TMP/e")
+is "a second send is a duplicate" "$out" "ingested 0, duplicate 1"
+is "  and adds no row" "$(rows)" "2"
+
+before=$(cat "$GTG_STATE_DIR/log.tsv")
+out=$(printf '%s\n%s\n' 'not-a-row' $'2026-13-01T10:00:00\tpull-ups\t5\thome\t\t' | ./bin/gtg ingest 2>"$TMP/e")
+is "malformed lines fail the command" "$?" "1"
+is "  and are named" "$(grep -c '^rejected:' "$TMP/e")" "2"
+is "  the good rows stay" "$(cat "$GTG_STATE_DIR/log.tsv")" "$before"
+is "  summary still prints" "$(printf '%s' "$out" | grep -c 'ingested 0, duplicate 0')" "1"
+
+# One bad line must not throw away a good neighbour.
+mixed=$'2026-09-01T11:00:00\tpush-ups\t20\thome\t\t'
+out=$(printf '%s\n%s\n' "$mixed" $'only-five\tfields\there\tno\tts' | ./bin/gtg ingest 2>"$TMP/e")
+is "a mixed batch fails" "$?" "1"
+is "  but keeps the valid row" "$(tail -1 "$GTG_STATE_DIR/log.tsv")" "$mixed"
+
+# Calendar and the page, once per batch, in-process so the overrides are the
+# ones that run. Skip rows are not events.
+reset_plan
+printf 'CALENDAR=Pretend\n' >>"$GTG_CONF_DIR/plan.txt"
+: >"$TMP/cal"
+page_n=0
+calendar_event() { printf '%s\n' "$1" >>"$TMP/cal"; }
+refresh_page() { page_n=$((page_n + 1)); }
+# Not a pipe: the right-hand side of one runs in a subshell, and the page
+# count would stay 0 here no matter what ingest did.
+unset GTG_NO_CALENDAR GTG_NO_PAGE
+printf '%s\n%s\n' "$pulls" $'2026-09-01T10:06:00\tpull-ups\tskip\thome\t\t' >"$TMP/in"
+ingest_rows >/dev/null <"$TMP/in"
+i=0
+while [ "$i" -lt 40 ] && [ ! -s "$TMP/cal" ]; do sleep 0.05; i=$((i + 1)); done
+is "ingest writes the calendar for a real set" "$(wc -l <"$TMP/cal" | tr -d ' ')" "1"
+is "  not for a skip" "$(grep -c skip "$TMP/cal")" "0"
+is "  and refreshes the page once" "$page_n" "1"
+export GTG_NO_CALENDAR=1 GTG_NO_PAGE=1
+page_n=0
+printf '%s\n' "$hang" >"$TMP/in"
+GTG_NO_PAGE=1 ingest_rows >/dev/null <"$TMP/in"
+is "GTG_NO_PAGE skips the refresh" "$page_n" "0"
+unset -f calendar_event refresh_page
+. ./bin/gtg-lib.sh
+
+echo "== hub client =="
+# ssh and rsync are stubs. A PATH entry in front of both fails the run if the
+# code reaches the real binaries: a test must never open a connection.
+GTG_HUB_STATE="$TMP/hub-state"
+GTG_HUB_CONF="$TMP/hub-conf"
+GTG_SSH_LOG="$TMP/ssh-log"
+GTG_SSH_LEAK="$TMP/ssh-leak"
+export GTG_HUB_STATE GTG_HUB_CONF GTG_SSH_LOG GTG_SSH_LEAK
+export GTG_SSH="$TMP/bin/gtg-ssh" GTG_RSYNC="$TMP/bin/gtg-rsync"
+unset GTG_SSH_FAIL GTG_RSYNC_FAIL
+cat >"$TMP/bin/gtg-ssh" <<'STUB'
+#!/bin/bash
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) shift 2 ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+shift # host
+printf '%s\n' "$*" >>"$GTG_SSH_LOG"
+[ "${GTG_SSH_FAIL:-}" = 1 ] && exit 1
+# A set recorded on the laptop while this send is in flight.
+if [ -n "${GTG_SSH_DURING:-}" ]; then
+  during=$GTG_SSH_DURING
+  (unset GTG_SSH_DURING; bash -c "$during")
+fi
+export GTG_STATE_DIR="$GTG_HUB_STATE" GTG_CONF_DIR="$GTG_HUB_CONF"
+export GTG_NO_CALENDAR=1 GTG_NO_PAGE=1
+# If the hub side thinks it is a client, this is the fail-loud ssh, not a network.
+export GTG_SSH="$(command -v ssh)"
+bash -c "$*"
+STUB
+cat >"$TMP/bin/gtg-rsync" <<'STUB'
+#!/bin/bash
+[ "${GTG_RSYNC_FAIL:-}" = 1 ] && { echo "rsync: connection failed" >&2; exit 1; }
+prev=""
+src=""
+dest=""
+for a in "$@"; do
+  case "$prev" in
+    -e) prev=""; continue ;;
+  esac
+  case "$a" in
+    -e) prev=-e; continue ;;
+    --timeout=*) continue ;;
+    -*) continue ;;
+    *) if [ -z "$src" ]; then src=$a; else dest=$a; fi ;;
+  esac
+done
+base=$(basename "${src#*:}")
+from="$GTG_HUB_STATE/$base"
+if [ ! -f "$from" ]; then
+  echo "rsync: link_stat \"$base\" failed: No such file or directory (2)" >&2
+  exit 23
+fi
+cp "$from" "$dest"
+STUB
+cat >"$TMP/bin/ssh" <<'STUB'
+#!/bin/bash
+echo REALSSH >>"$GTG_SSH_LEAK"
+exit 97
+STUB
+cat >"$TMP/bin/rsync" <<'STUB'
+#!/bin/bash
+echo REALRSYNC >>"$GTG_SSH_LEAK"
+exit 97
+STUB
+chmod +x "$TMP/bin/gtg-ssh" "$TMP/bin/gtg-rsync" "$TMP/bin/ssh" "$TMP/bin/rsync"
+hub_path=$PATH
+PATH="$TMP/bin:$PATH"
+
+reset_client() {
+  reset_plan
+  printf 'HUB=mini\nHUB_GTG=%s\n' "$REPO/bin/gtg" >>"$GTG_CONF_DIR/plan.txt"
+  : >"$GTG_STATE_DIR/log.tsv"
+  rm -f "$GTG_STATE_DIR/outbox.tsv" "$GTG_STATE_DIR/outbox.sending" "$GTG_STATE_DIR/paused" \
+        "$GTG_STATE_DIR/pause.pending" "$GTG_STATE_DIR/nudge.log" "$GTG_SSH_LOG"
+  mkdir -p "$GTG_HUB_STATE" "$GTG_HUB_CONF"
+  cat >"$GTG_HUB_CONF/plan.txt" <<'P'
+WAKE_START=0
+WAKE_END=24
+every: pull-ups x5 | push-ups x20 | ring dips x5 | farmer walk 1 min
+P
+  : >"$GTG_HUB_STATE/log.tsv"
+  rm -f "$GTG_HUB_STATE/paused"
+  unset GTG_SSH_FAIL GTG_RSYNC_FAIL GTG_SSH_DURING
+}
+queued() { cat "$GTG_STATE_DIR/outbox.tsv" "$GTG_STATE_DIR/outbox.sending" 2>/dev/null; }
+# Background flush: the nudge must not wait on ssh, so record() returns before
+# the outbox is necessarily empty. Give it a moment, then fail loud.
+outbox_clear() {
+  local i=0
+  while [ "$i" -lt 80 ]; do
+    [ -z "$(queued)" ] && return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+noted() {
+  local i=0
+  while [ "$i" -lt 80 ]; do
+    grep -q "$1" "$GTG_STATE_DIR/nudge.log" 2>/dev/null && return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# No HUB= line: the mirror outbox does not exist, same as before this feature.
+reset_plan
+rm -f "$GTG_STATE_DIR/outbox.tsv"
+GTG_NO_PAGE=1 record 'pull-ups' 5 home
+is "no hub: nothing queued" "$([ -e "$GTG_STATE_DIR/outbox.tsv" ] && echo yes || echo no)" "no"
+
+reset_client
+./bin/gtg 'pull-ups x5' >/dev/null
+outbox_clear
+is "a client set reaches the hub" \
+  "$(awk -F'\t' 'NR==1{print $2,$3,$4}' "$GTG_HUB_STATE/log.tsv")" "pull-ups 5 away"
+is "  the local mirror has the same row" \
+  "$(cat "$GTG_STATE_DIR/log.tsv")" "$(cat "$GTG_HUB_STATE/log.tsv")"
+is "  and the outbox is empty" \
+  "$([ -s "$GTG_STATE_DIR/outbox.tsv" ] && echo full || echo empty)" "empty"
+
+reset_client
+./bin/gtg 'farmer walk 1 min' >/dev/null
+outbox_clear
+is "a timed set keeps empty fields on the hub" \
+  "$(awk -F'\t' '{printf "%s[%s][%s][%s]", NF,$3,$5,$6}' "$GTG_HUB_STATE/log.tsv")" \
+  "6[][][60]"
+
+reset_client
+export GTG_SSH_FAIL=1
+./bin/gtg 'pull-ups x5' >/dev/null
+noted 'hub flush failed'
+is "a failed flush keeps the row" \
+  "$(queued | awk -F'\t' '{print $2}')" "pull-ups"
+is "  in the mirror too" "$(awk -F'\t' '{print $2}' "$GTG_STATE_DIR/log.tsv")" "pull-ups"
+is "  and not on the hub yet" "$(wc -l <"$GTG_HUB_STATE/log.tsv" | tr -d ' ')" "0"
+is "  and says so in the nudge log" \
+  "$(grep -c 'hub flush failed' "$GTG_STATE_DIR/nudge.log")" "1"
+unset GTG_SSH_FAIL
+./bin/gtg flush >/dev/null
+is "a later flush delivers it" \
+  "$(awk -F'\t' '{print $2}' "$GTG_HUB_STATE/log.tsv")" "pull-ups"
+is "  exactly once" "$(wc -l <"$GTG_HUB_STATE/log.tsv" | tr -d ' ')" "1"
+is "  and clears the outbox" "$(queued)" ""
+
+# A set recorded while a flush is on the wire must survive that flush.
+reset_client
+printf '2026-09-30T08:00:00\tpull-ups\t5\thome\t\t\n' >"$GTG_STATE_DIR/outbox.tsv"
+export GTG_SSH_DURING="cd '$REPO' && . bin/gtg-lib.sh && GTG_NO_PAGE=1 GTG_AT=2026-09-30T08:05:00 record ring-dips 5 home"
+./bin/gtg flush >/dev/null
+unset GTG_SSH_DURING
+is "a set recorded mid-flush is still queued" "$(queued | awk -F'\t' '{print $2}')" "ring-dips"
+./bin/gtg flush >/dev/null
+is "  and the next flush delivers both, once each" \
+  "$(awk -F'\t' '{print $2}' "$GTG_HUB_STATE/log.tsv" | paste -sd, -)" "pull-ups,ring-dips"
+
+# Pull must not replace the mirror while an unsent row would be thrown away.
+reset_client
+printf 'local-only\n' >"$GTG_STATE_DIR/log.tsv"
+printf 'not yet sent\n' >"$GTG_STATE_DIR/outbox.tsv"
+printf 'hub-copy\n' >"$GTG_HUB_STATE/log.tsv"
+out=$(./bin/gtg pull 2>"$TMP/e")
+is "pull with a full outbox keeps the mirror" "$(cat "$GTG_STATE_DIR/log.tsv")" "local-only"
+is "  and says why" "$(printf '%s' "$out" | grep -c 'outbox')" "1"
+rm -f "$GTG_STATE_DIR/outbox.tsv" "$GTG_STATE_DIR/outbox.sending"
+./bin/gtg pull >/dev/null
+is "pull with an empty outbox takes the hub log" "$(cat "$GTG_STATE_DIR/log.tsv")" "hub-copy"
+
+reset_client
+printf 'keep-me\n' >"$GTG_STATE_DIR/log.tsv"
+printf 'hub-copy\n' >"$GTG_HUB_STATE/log.tsv"
+export GTG_RSYNC_FAIL=1
+./bin/gtg pull >/dev/null 2>&1
+is "a failed pull keeps the stale mirror" "$(cat "$GTG_STATE_DIR/log.tsv")" "keep-me"
+is "  and is noted" "$(grep -c 'hub pull failed' "$GTG_STATE_DIR/nudge.log")" "1"
+unset GTG_RSYNC_FAIL
+
+reset_client
+./bin/gtg off 2h sick >/dev/null
+is "pause is forwarded" "$(grep -c 'off 2h sick' "$GTG_SSH_LOG")" "1"
+is "  locally" "$([ -s "$GTG_STATE_DIR/paused" ] && echo yes || echo no)" "yes"
+is "  and on the hub" "$([ -s "$GTG_HUB_STATE/paused" ] && echo yes || echo no)" "yes"
+./bin/gtg on >/dev/null
+is "resume is forwarded" "$(grep -c ' on$' "$GTG_SSH_LOG")" "1"
+is "  hub pause cleared" "$([ -f "$GTG_HUB_STATE/paused" ] && echo yes || echo no)" "no"
+# The local file can already be gone while the hub is still paused. `gtg on`
+# still has to say so, or the next pull puts the pause back.
+./bin/gtg on >/dev/null
+is "a second gtg on still tells the hub" "$(grep -c ' on$' "$GTG_SSH_LOG")" "2"
+
+reset_client
+export GTG_SSH_FAIL=1
+./bin/gtg off sick >/dev/null
+is "a failed forward keeps the local pause" \
+  "$([ -s "$GTG_STATE_DIR/paused" ] && echo yes || echo no)" "yes"
+is "  and is noted" "$(grep -c 'hub command failed' "$GTG_STATE_DIR/nudge.log")" "1"
+is "  hub was not paused" "$([ -f "$GTG_HUB_STATE/paused" ] && echo yes || echo no)" "no"
+unset GTG_SSH_FAIL
+
+# The nudge has to see a pause made on the hub before it decides to speak.
+# Running gtg-nudge to prove the order is not safe: a miss opens a real
+# dialog, and killing osascript leaves the window up. The order is the
+# contract; pull itself is asserted above.
+order=$(awk '
+  /hub_pull/ && !h { h = NR }
+  /^if pause_active/ && !a { a = NR }
+  END { print (h && a && h < a) ? "before" : "after" }
+' bin/gtg-nudge)
+is "a nudge pulls before it checks the pause" "$order" "before"
+
+reset_client
+# CALENDAR= and a real row, so the refusal is the hub check and not the
+# empty-log or missing-calendar exits this command already had.
+printf 'CALENDAR=Pretend\n' >>"$GTG_CONF_DIR/plan.txt"
+printf '2026-09-01T08:00:00\tpull-ups\t5\taway\t\t\n' >>"$GTG_STATE_DIR/log.tsv"
+./bin/gtg calendar-sync >/dev/null 2>"$TMP/e"
+is "calendar-sync refuses on a client" "$?" "1"
+is "  and says the hub owns it" "$(grep -c 'hub' "$TMP/e")" "1"
+./bin/gtg backfill >/dev/null 2>"$TMP/e"
+is "backfill refuses on a client" "$?" "1"
+
+# status is what the menu bar parses. The pull is quiet; the first line stays
+# `where:`.
+reset_client
+printf '2026-09-01T08:00:00\tpull-ups\t5\taway\t\t\n' >"$GTG_HUB_STATE/log.tsv"
+out=$(./bin/gtg status 2>"$TMP/e")
+is "status still leads with where" "$(printf '%s\n' "$out" | head -1 | cut -d: -f1)" "where"
+is "  and pulled first" "$(cat "$GTG_STATE_DIR/log.tsv")" "$(cat "$GTG_HUB_STATE/log.tsv")"
+
+is "the suite never called ssh or rsync" \
+  "$([ -s "$GTG_SSH_LEAK" ] && cat "$GTG_SSH_LEAK" || echo clean)" "clean"
+PATH=$hub_path
+reset_plan
+rm -f "$GTG_STATE_DIR/outbox.tsv"
+
 echo "== isolation: nothing live was touched =="
 # Content comparison, not mtime: an mtime threshold moves whenever the suite
 # creates a file, which can hide a write that happened before it.
@@ -801,4 +1102,4 @@ done <"$LIVE"
 is "live log, page, stamp and plan all unchanged" "$mutated" "0"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
-[ "$fail" -eq 0 ]
+bash test/server.sh && [ "$fail" -eq 0 ]

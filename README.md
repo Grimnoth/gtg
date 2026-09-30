@@ -23,9 +23,10 @@
 
 An hourly nudge to do a grease-the-groove set, and a one-word way to log it.
 
-No server, no webhook, no running agent. macOS already ships the scheduler
-(`launchd`) and the notifier (`osascript`); this is two short shell scripts and a
-plist on top of them.
+The nudge is launchd and osascript: two short shell scripts and a plist. The
+log and the calendar live on the Mac mini, which also serves
+`https://<hub>.<tailnet>.ts.net/gtg` so an agent can log a set from
+anywhere on the tailnet. See "The hub".
 
 ## Install
 
@@ -48,7 +49,8 @@ one you would have to trust.
 ./ship "what changed"
 ```
 
-Tests, commits, pushes, and deploys to this Mac. One word, because it was
+Tests, commits, pushes, and deploys to this Mac, then to the hub if it
+answers. One word, because it was
 never really one step: the working tree IS the running tool, since launchd and
 the menu bar execute `bin/` directly, but `hammerspoon/gtg.lua` is a COPY that
 `install.sh` puts in place. Editing the menu bar and pushing left the pushed
@@ -83,6 +85,8 @@ gtg stats      totals by exercise, all time
 gtg page       open the visual history in a browser
 gtg plan       print the current plan
 gtg edit       open the plan in $EDITOR
+gtg pull       copy the hub's log over this one
+gtg flush      send the hub whatever is still in the outbox
 ```
 
 The plan lives at `~/.config/gtg/plan.txt` and is re-read on every nudge, so
@@ -216,7 +220,9 @@ calendar as a zero-minute event at the set's own time, so a backdated 7:15
 set lands at 7:15. The calendar lives in Google, synced into Calendar.app, so
 the history is on the phone and in the calendar already being looked at. The
 write goes through Calendar.app by AppleScript, in the background, and is
-idempotent: the same set at the same minute is never written twice.
+idempotent: the same set at the same minute is never written twice. With
+`HUB=` set, this machine does not write the calendar. The hub does, when the
+row arrives.
 
 `gtg calendar-sync 30` writes the last 30 days. It is the one-time backfill,
 and the repair if Calendar.app was not running for a while. Safe to re-run.
@@ -239,6 +245,37 @@ to record. `AbandonProcessGroup` in the plist is the fix, and it was
 measured before it was trusted: two throwaway jobs, one with the key and one
 without, and only one child survived. Re-run `install.sh` after pulling this
 so the loaded job carries it.
+
+## The hub
+
+The Mac mini holds the log and writes the calendar. This laptop keeps the
+nudges, the menu bar and `gtg say`, and sends every set to the mini.
+
+`HUB=mini` in `plan.txt` is the switch. `mini` is an ssh host. With no `HUB=`
+line, this machine is the hub and behaves as it always has: the row is
+appended here and the calendar event is written here.
+
+On a client the row is appended to the local log immediately, so the menu bar
+and `gtg today` see it, and to `~/.local/state/gtg/outbox.tsv`. A flush sends
+that file to `gtg ingest` on the hub and drops the rows the hub accepted.
+Anything still unsent stays. A failed flush is a line in the nudge log, and
+the rows stay until the next one. `gtg pull` copies the hub's log back over
+the local one, and will not while the outbox still has rows, so an unsent set
+is never replaced by an older copy. `gtg status` and each nudge pull first.
+
+`gtg off` and `gtg on`, and "not today" typed at a nudge, run here and are
+forwarded to the hub. A later pull mirrors the hub's pause. If the forward
+does not get through, the local pause stays and the nudge log says so.
+
+The calendar belongs to the hub. `gtg calendar-sync` and `gtg backfill` on a
+client say so and do nothing.
+
+On the mini, `./install.sh hub` installs the server and a 15-minute calendar
+sync. It does not install the nudge. `./ship` updates this Mac and then, if
+`ssh mini` works, pulls and runs that on the mini.
+
+Agents use `https://<hub>.<tailnet>.ts.net/gtg`. The token, the
+routes and the text to send are in `docs/agent.md`.
 
 ## Say it
 
@@ -885,7 +922,9 @@ than a reminder system that quietly stops reminding and takes a week to notice.
 | --- | --- |
 | `~/.config/gtg/plan.txt` | Your plan and settings. Yours; never overwritten. |
 | `~/.config/gtg/home-gateway-mac` | Written by `install.sh`. |
-| `~/.local/state/gtg/log.tsv` | The log. `iso8601 · exercise · reps · home\|away · weight · seconds` |
+| `~/.local/state/gtg/log.tsv` | The log. `iso8601 · exercise · reps · home\|away · weight · seconds`. On a client this is a mirror of the hub. |
+| `~/.local/state/gtg/outbox.tsv` | Sets the hub has not accepted yet. |
+| `~/.config/gtg/token` | Bearer token for the hub's HTTP server. `install.sh hub` creates it. |
 | `~/.local/state/gtg/log.tsv.migrated` | A `gtg backfill` proposal. Yours to inspect and move, or delete. |
 | `test/run.sh` | The test suite. Runs against a scratch dir; cannot touch your log. |
 | `~/.local/state/gtg/nudge.log` | What the scheduled job did, and why it skipped. |

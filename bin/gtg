@@ -34,6 +34,9 @@ gtg skip       record a miss
 gtg add "X"    teach it a new movement (gtg add "swings x10 @ 50 lb" [pool])
 gtg backfill   propose splitting old entry names into columns (writes nothing)
 gtg calendar-sync  put the last 30 days of sets on the CALENDAR= calendar (gtg calendar-sync 90)
+gtg ingest     (hub) take log rows on stdin; a repeat of the same line is skipped
+gtg pull       (client) copy the hub's log over this one
+gtg flush      (client) send rows the hub has not accepted yet
 gtg nudges     the last 20 fires and what each one did (gtg nudges 50)
 gtg fires      what became of every nudge in the last 14 days (gtg fires 30)
 gtg note "X"   stamp a line into the nudge log (the menu bar's catch-up uses it)
@@ -268,6 +271,10 @@ case "${1:-done}" in
     ;;
 
   backfill)
+    if [ -n "$(cfg HUB)" ]; then
+      echo "the hub owns the log; run gtg backfill there" >&2
+      exit 1
+    fi
     # One-time repair for rows written before weight and duration had columns
     # of their own, where both were stranded inside the movement name. Opt-in
     # and never automatic, because it rewrites the log; the previous file is
@@ -364,6 +371,10 @@ case "${1:-done}" in
     ;;
 
   calendar-sync)
+    if [ -n "$(cfg HUB)" ]; then
+      echo "the hub owns the calendar; run gtg calendar-sync there" >&2
+      exit 1
+    fi
     # Put every set from the last N days (default 30) on the calendar named
     # in plan.txt. Safe to re-run: an event already there is not written
     # twice. This is the one-time backfill for rows logged before the
@@ -457,7 +468,38 @@ case "${1:-done}" in
 
   today) today_report ;;
 
+  ingest)
+    ingest_rows
+    exit $?
+    ;;
+
+  pull)
+    hub_pull
+    rc=$?
+    printf '%s\n' "$PULL_NOTE"
+    exit "$rc"
+    ;;
+
+  flush)
+    if [ -z "$(cfg HUB)" ]; then
+      echo "no HUB= in $PLAN" >&2
+      exit 1
+    fi
+    if ! hub_flush; then
+      echo "flush failed; rows kept in the outbox" >&2
+      exit 1
+    fi
+    if unsent; then
+      echo "outbox still has $(cat "$OUTBOX" "$SPOOL" 2>/dev/null | wc -l | tr -d ' ') row(s)"
+    else
+      echo "outbox empty"
+    fi
+    ;;
+
   status)
+    # The menu bar reads this. With a hub, the mirror is whatever the last
+    # pull left, so pull first or the menu shows a set the hub already moved on.
+    [ -n "$(cfg HUB)" ] && hub_pull
     # Everything the menu bar draws, in ONE process. It used to make three
     # calls on every click -- `today`, `where` and `options` -- which measured
     # just over a second on this Mac, and a menu that shells out while you
@@ -486,6 +528,7 @@ case "${1:-done}" in
     fi
     pause_set "$ends" "$PAUSE_REASON"
     note "paused until $(pause_human "$ends")${PAUSE_REASON:+ ($PAUSE_REASON)}" >>"$NUDGE_LOG"
+    hub_forward_off
     printf 'nudges off until %s%s\n' "$(pause_human "$ends")" "${PAUSE_REASON:+ ($PAUSE_REASON)}"
     echo "  gtg on   turns them back on"
     ;;
@@ -499,6 +542,9 @@ case "${1:-done}" in
     else
       echo "nudges are already on"
     fi
+    # Even when nothing is paused here. The hub's pause is the one that
+    # matters, and a stale mirror would otherwise leave it in place.
+    hub_forward on
     ;;
 
   week)
@@ -593,6 +639,7 @@ case "${1:-done}" in
         if ! ends=$(pause_ends "$PAUSE_FOR"); then ends=$(pause_ends); fi
         pause_set "$ends" "$PAUSE_REASON"
         note "paused until $(pause_human "$ends")${PAUSE_REASON:+ ($PAUSE_REASON)}" >>"$NUDGE_LOG"
+        hub_forward_off
         printf 'nudges off until %s%s\n' "$(pause_human "$ends")" "${PAUSE_REASON:+ ($PAUSE_REASON)}"
         exit 0
       fi
