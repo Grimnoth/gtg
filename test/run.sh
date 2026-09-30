@@ -1648,5 +1648,21 @@ while IFS=$'\t' read -r f want; do
 done <"$LIVE"
 is "live log, page, stamp, plan, key and token all unchanged" "$mutated" "0"
 
+# 03:00 on the spring-forward morning: one second earlier does not exist in
+# local time, and a window built there came out backwards.
+dst_ok() {
+  /usr/bin/python3 - "$REPO/bin/gtg-gcal" "$1" <<'PY'
+import sys, importlib.machinery, importlib.util
+from datetime import datetime
+loader = importlib.machinery.SourceFileLoader("gcal", sys.argv[1])
+spec = importlib.util.spec_from_loader("gcal", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+b, e = m.minute_bounds(sys.argv[2], "America/New_York")
+print("ordered" if datetime.fromisoformat(b) < datetime.fromisoformat(e) else "backwards")
+PY
+}
+is "the list window is ordered at spring-forward 03:00" "$(dst_ok 2026-03-08T03:00:00)" "ordered"
+is "  and at fall-back 01:30" "$(dst_ok 2026-11-01T01:30:00)" "ordered"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 bash test/server.sh && [ "$fail" -eq 0 ]

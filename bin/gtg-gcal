@@ -75,7 +75,10 @@ def minute_bounds(iso, tzname):
         return "", ""
     # timeMin is an exclusive lower bound on the event's end. A zero-minute
     # event ends at its start, so a bound on the minute itself hides it and
-    # the next sync inserts a duplicate.
+    # the next sync inserts a duplicate. The arithmetic is in UTC: one second
+    # before 03:00 on the spring-forward morning is a local time that does not
+    # exist, and local math there put timeMin after timeMax.
+    start = start.astimezone(ZoneInfo("UTC"))
     begin = start - timedelta(seconds=1)
     end = start + timedelta(seconds=60)
     return begin.isoformat(), end.isoformat()
