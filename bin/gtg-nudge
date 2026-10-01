@@ -191,6 +191,68 @@ print(json.dumps(body))')
   fi
 }
 
+# Presses Snooze on our own alert, found by its three buttons. Pressing a
+# button, not killing osascript: System Events owns the window, and a killed
+# osascript leaves it on screen with nothing to collect it (see osa below).
+# Hammerspoon because it already holds the Accessibility grant.
+DISMISS_LUA='
+local app = hs.application.get("com.apple.systemevents")
+if not app then return "0" end
+local function find(el, depth, want)
+  if depth > 4 then return nil end
+  for _, c in ipairs(el:attributeValue("AXChildren") or {}) do
+    if c:attributeValue("AXRole") == "AXButton" and c:attributeValue("AXTitle") == want then return c end
+    local hit = find(c, depth + 1, want)
+    if hit then return hit end
+  end
+  return nil
+end
+local n = 0
+for _, w in ipairs(hs.axuielement.applicationElement(app):attributeValue("AXWindows") or {}) do
+  local snooze = find(w, 0, "Snooze")
+  if snooze and find(w, 0, "Did it") and find(w, 0, "Other...") then
+    snooze:performAction("AXPress")
+    n = n + 1
+  end
+end
+return tostring(n)'
+
+dismiss_dialog() {
+  if [ -n "${GTG_DISMISS_CMD:-}" ]; then
+    bash -c "$GTG_DISMISS_CMD" 2>/dev/null
+    return
+  fi
+  [ -n "${HS:-}" ] || { printf '0'; return; }
+  "$HS" -t 5 -c "$DISMISS_LUA" 2>/dev/null | tail -1
+}
+
+# Runs beside the dialog. A set logged anywhere else since the hub gave this
+# machine the hour -- the bot, the CLI, the phone -- takes the dialog down.
+# Leaves the set in $ELSEWHERE so the main script knows the Snooze was ours.
+watch_elsewhere() {
+  local url pid resp got pressed
+  url=$(cfg HUB_URL)
+  while :; do
+    sleep "${GTG_ELSEWHERE_POLL:-20}"
+    pid=$(cat "$DIALOG_PID" 2>/dev/null)
+    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 0
+    resp=$(hub_http_post "${url%/}/api/route/status" "{\"slot\":\"$ROUTE_SLOT\"}") || continue
+    got=$(printf '%s' "$resp" | /usr/bin/python3 -c 'import json,sys
+try:
+    b=json.load(sys.stdin)
+except Exception:
+    b={}
+if b.get("logged") is True:
+    print(b.get("what") or "a set")')
+    [ -n "$got" ] || continue
+    printf '%s' "$got" >"$ELSEWHERE"
+    pressed=$(dismiss_dialog)
+    [ "${pressed:-0}" != 0 ] || note "logged elsewhere ($got), but the dialog could not be closed"
+    return 0
+  done
+}
+
 # note() lives in gtg-lib.sh: `gtg note` writes the same shape of line.
 
 [ -r "$PLAN" ] || { note "FATAL: no plan file at $PLAN"; exit 1; }
@@ -547,7 +609,31 @@ or: $hint"
   fi
 
   DIALOG_OPENED=$(date +%s)
+  ELSEWHERE="$STATE_DIR/dialog.elsewhere"
+  rm -f "$ELSEWHERE"
+  watcher=""
+  case "${ROUTE_RESULT:-}:${ROUTE_SLOT:-}" in
+    laptop:????-??-??T??)
+      watch_elsewhere &
+      watcher=$! ;;
+  esac
   answer=$(osa "$(alert_for "$msg")")
+  if [ -n "$watcher" ]; then
+    pkill -P "$watcher" 2>/dev/null || true
+    kill "$watcher" 2>/dev/null || true
+  fi
+
+  # Our own Snooze press, because the set was logged somewhere else. Stamped
+  # like a logged answer, so the next fire is debounced rather than asking
+  # for a set that is already done.
+  if [ "$answer" = Snooze ] && [ -s "$ELSEWHERE" ]; then
+    note "dismissed: logged elsewhere ($(cat "$ELSEWHERE"))"
+    rm -f "$ELSEWHERE"
+    route_answered elsewhere
+    printf '%s' "$now" >"$STAMP"
+    exit 0
+  fi
+  rm -f "$ELSEWHERE"
 
   case "$answer" in
     # Empty now means the dialog FAILED TO DISPLAY, which is a different

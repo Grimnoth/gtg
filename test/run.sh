@@ -2062,6 +2062,17 @@ printf '%s' "$n" >"$GTG_DIALOG_N"
 case "${GTG_DIALOG:-snooze}" in
   timeout) sleep "${GTG_DIALOG_SLEEP:-0}"; printf '__TIMEOUT__' ;;
   empty) sleep "${GTG_DIALOG_SLEEP:-0}" ;;
+  wait)
+    # Up until something presses Snooze for us, or it gives up. With
+    # GTG_ELSEWHERE_ROW, that set lands on the hub while the dialog is up.
+    if [ -n "${GTG_ELSEWHERE_ROW:-}" ]; then
+      printf '%s\t%s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$GTG_ELSEWHERE_ROW" >>"$GTG_STATE_DIR/log.tsv"
+    fi
+    i=0
+    while [ "$i" -lt "${GTG_DIALOG_SLEEP:-5}" ] && [ ! -e "$GTG_DISMISS_FLAG" ]; do
+      sleep 1; i=$((i + 1))
+    done
+    if [ -e "$GTG_DISMISS_FLAG" ]; then printf 'Snooze'; else printf '__TIMEOUT__'; fi ;;
   did) printf 'Did it' ;;
   off)
     if [ "$n" -eq 1 ]; then printf 'Other...'; else printf 'off'; fi ;;
@@ -2357,6 +2368,47 @@ out=$(./bin/gtg-nudge 2>&1) || rc=$?
 is "a failed dialog hands off an active user" "$rc" "1"
 is "  exactly one webhook" "$(wh_n)" "1"
 is "  for that slot" "$(wh_field 0 slot)" "$(date '+%Y-%m-%dT%H')"
+
+# A set logged somewhere else while the dialog is up takes it down.
+export GTG_DISMISS_FLAG="$TMP/dismissed" GTG_ELSEWHERE_POLL=1
+export GTG_DISMISS_CMD="touch '$TMP/dismissed'; printf 1"
+route_clear
+rm -f "$TMP/dismissed"
+: >"$TMP/dialog-n"
+export GTG_DIALOG=wait GTG_DIALOG_SLEEP=8 IDLE_A=0 IDLE_B=0
+export GTG_ELSEWHERE_ROW=$'pull-ups\t5\taway\t\t'
+out=$(./bin/gtg-nudge 2>&1)
+unset GTG_ELSEWHERE_ROW
+is "a set logged elsewhere closes the dialog" "$(printf '%s\n' "$out" | grep -c 'dismissed: logged elsewhere (pull-ups x5)')" "1"
+is "  by pressing it, once" "$([ -e "$TMP/dismissed" ] && echo yes || echo no)" "yes"
+is "  answered as elsewhere" "$(answered_how)" "elsewhere"
+is "  and stamped, so the next fire is debounced" "$(stamp_set)" "yes"
+is "  no snooze line" "$(printf '%s\n' "$out" | grep -c '  snoozed$')" "0"
+is "  no phone ping" "$(wh_n)" "0"
+
+resp=$(post_route '{"device":"laptop","idle":0}')
+is "the :50 retry after a set elsewhere skips as done" "$(jget "$resp" route)" "skip:done"
+is "  and the hour stays the laptop's" "$(slot_of | cut -f1)" "laptop"
+
+route_clear
+rm -f "$TMP/dismissed"
+: >"$TMP/dialog-n"
+export GTG_DIALOG_SLEEP=3
+out=$(./bin/gtg-nudge 2>&1)
+is "no set elsewhere: the dialog is left alone" "$([ -e "$TMP/dismissed" ] && echo pressed || echo untouched)" "untouched"
+is "  and gives up as before" "$(printf '%s\n' "$out" | grep -c 'no answer (dismissed itself')" "1"
+is "  with no dismissal line" "$(printf '%s\n' "$out" | grep -c 'dismissed: logged elsewhere')" "0"
+
+route_clear
+post_route '{"device":"laptop","idle":0}' >/dev/null
+st=$(hub_http_post "http://127.0.0.1:$route_port/api/route/status" "{\"slot\":\"$(date '+%Y-%m-%dT%H')\"}")
+is "status before a set: not logged" "$(jget "$st" logged)" "false"
+printf '%s\tsquats\t10\thome\t\t\n' "$(date '+%Y-%m-%dT%H:%M:%S')" >>"$GTG_STATE_DIR/log.tsv"
+st=$(hub_http_post "http://127.0.0.1:$route_port/api/route/status" "{\"slot\":\"$(date '+%Y-%m-%dT%H')\"}")
+is "  after one: logged" "$(jget "$st" logged)" "true"
+is "  naming it" "$(jget "$st" what)" "squats x10"
+is "  and status writes nothing" "$(grep -c . "$GTG_STATE_DIR/slots.tsv")" "1"
+unset GTG_DISMISS_FLAG GTG_ELSEWHERE_POLL GTG_DISMISS_CMD
 
 is "route tests never called ssh or rsync" \
   "$([ -s "$GTG_SSH_LEAK" ] && echo leak || echo clean)" "clean"

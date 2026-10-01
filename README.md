@@ -341,6 +341,13 @@ ssh mini 'cat ~/.config/gtg/token' > ~/.config/gtg/token && chmod 600 ~/.config/
 
 If the hub cannot be reached, the dialog shows as it always has.
 
+A set logged somewhere else while the laptop dialog is up (the bot, the CLI)
+takes the dialog down. The laptop asks the hub every 20 seconds; once a set
+has landed since the hour was claimed, Hammerspoon presses the dialog's own
+Snooze, the nudge log says `dismissed: logged elsewhere (...)`, and the next
+fire is debounced. The :50 retry for that hour stays quiet too. Without
+Hammerspoon the dialog stays and the log says it could not be closed.
+
 The phone side is a file on the hub, `~/.config/gtg/grok-webhook`, mode 600.
 Line 1 is the URL, line 2 is the key. You write it. It is never committed,
 printed, or logged. A failed send still owns the hour, so a retry cannot

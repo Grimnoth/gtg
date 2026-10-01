@@ -692,6 +692,10 @@ def _handoff_blocked(slot, detail):
 def perform_route(idle, meeting, client_where=None):
     slot = _slot_now()
     owner, detail = _slot_owner(slot)
+    # A laptop hour with a set logged since the claim is done, so the :50
+    # retry stays quiet. Answered, not written: the owner does not change.
+    if owner == "laptop" and _handoff_blocked(slot, detail):
+        return "skip:done", slot
     if owner:
         return _owner_route(owner, detail), slot
     decision = slot_route(
@@ -725,8 +729,35 @@ def perform_handoff(meeting, slot=None, client_where=None):
     return route, slot, route == "handoff"
 
 
+def _last_set():
+    last = None
+    for cols in _each_log_row():
+        if _is_set_row(cols):
+            last = cols
+    if last is None:
+        return ""
+    reps = last[2] if len(last) > 2 else ""
+    return ("%s x%s" % (last[1], reps)) if reps else last[1]
+
+
+def slot_status(slot=None):
+    # Read-only. The laptop polls this while its dialog is up, so a set
+    # logged through the bot or the CLI can take the dialog down.
+    if not _slot_key_ok(slot):
+        slot = _slot_now()
+    owner, detail = _slot_owner(slot)
+    logged = owner == "laptop" and _handoff_blocked(slot, detail)
+    return {
+        "ok": True,
+        "slot": slot,
+        "route": _owner_route(owner, detail),
+        "logged": logged,
+        "what": _last_set() if logged else "",
+    }
+
+
 def perform_answered(how, slot=None):
-    if how not in ("log", "skip", "snooze", "off"):
+    if how not in ("log", "skip", "snooze", "off", "elsewhere"):
         how = "log"
     if not _slot_key_ok(slot):
         slot = _slot_now()
@@ -785,6 +816,12 @@ def api_route_answered(query, body):
     with WRITE_LOCK:
         route, slot = perform_answered(how, slot)
     return _route_body(route, slot)
+
+
+def api_route_status(query, body):
+    body = as_dict(body)
+    slot = body.get("slot") if isinstance(body.get("slot"), str) else None
+    return 200, slot_status(slot)
 
 
 def schema(name, description, properties, required=None):
@@ -972,6 +1009,7 @@ API = {
     ("POST", "/api/route"): api_route,
     ("POST", "/api/route/handoff"): api_route_handoff,
     ("POST", "/api/route/answered"): api_route_answered,
+    ("POST", "/api/route/status"): api_route_status,
 }
 
 

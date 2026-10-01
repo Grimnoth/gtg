@@ -55,8 +55,10 @@ refuse() {
   GTG_CONF_DIR="$conf" GTG_STATE_DIR="$TMP/refuse-state" GTG_PORT=9 \
     GTG_NO_CALENDAR=1 \
     /usr/bin/python3 "$REPO/bin/gtg-server" >"$TMP/refuse.out" 2>"$TMP/refuse.err" &
-  local pid=$!
-  sleep 0.3
+  local pid=$! i=0
+  # Polled, not a fixed 0.3s: on a loaded machine Python can take longer than
+  # that just to start, and the check failed with nothing wrong.
+  while [ "$i" -lt 50 ] && kill -0 "$pid" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
   if kill -0 "$pid" 2>/dev/null; then
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
