@@ -494,6 +494,8 @@ note "seen: $seen"
 # later nudge -- the same silent death the banner already died once.
 LOCK="$STATE_DIR/nudge.lock"
 DIALOG_PID="$STATE_DIR/dialog.pid"
+# osascript's stderr, kept so an empty answer can say why.
+DIALOG_ERR="$STATE_DIR/dialog.err"
 
 # Reap a dialog stranded by an earlier run before opening a new one. With the
 # `with timeout of` fix below this should never fire, but a stale window shows
@@ -551,7 +553,7 @@ osa() {
   local out pid bin
   bin=${GTG_OSASCRIPT:-/usr/bin/osascript}
   out=$(mktemp)
-  "$bin" >"$out" 2>/dev/null <<<"$1" &
+  "$bin" >"$out" 2>"$DIALOG_ERR" <<<"$1" &
   pid=$!
   printf '%s' "$pid" >"$DIALOG_PID"
   wait "$pid" 2>/dev/null || true
@@ -621,7 +623,8 @@ or: $hint"
   rm -f "$ELSEWHERE"
   case "${ROUTE_RESULT:-}:${ROUTE_SLOT:-}" in
     laptop:????-??-??T??)
-      watch_elsewhere &
+      # stderr dropped: bash reports the killed sleep as "Terminated".
+      watch_elsewhere 2>/dev/null &
       watcher=$! ;;
   esac
   answer=$(osa "$(alert_for "$msg")")
@@ -641,13 +644,26 @@ or: $hint"
     printf '%s' "$now" >"$STAMP"
     exit 0
   fi
+  # Measured 2026-10-01 on the real laptop: the press ended osascript with an
+  # empty answer and left the window up, and a second press closed it. So an
+  # empty answer after a set landed elsewhere is that, not a failed display:
+  # press again to clear the orphan, and never hand the hour to the phone.
+  dialog_err=$(head -c 200 "$DIALOG_ERR" 2>/dev/null | tr '\n' ' ')
+  if [ -z "$answer" ] && [ -s "$ELSEWHERE" ]; then
+    cleared=$(dismiss_dialog)
+    note "dismissed: logged elsewhere ($(cat "$ELSEWHERE")); the dialog answered nothing${dialog_err:+ ($dialog_err)}, pressed again: ${cleared:-0}"
+    rm -f "$ELSEWHERE"
+    route_answered elsewhere
+    printf '%s' "$now" >"$STAMP"
+    exit 0
+  fi
   rm -f "$ELSEWHERE"
 
   case "$answer" in
     # Empty now means the dialog FAILED TO DISPLAY, which is a different
     # problem from being ignored, and previously both logged the same line.
     "")
-      note "ERROR: dialog did not display"
+      note "ERROR: dialog did not display${dialog_err:+ ($dialog_err)}"
       maybe_handoff force
       exit 1 ;;
     "__TIMEOUT__")
