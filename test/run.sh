@@ -2386,6 +2386,19 @@ is "  and stamped, so the next fire is debounced" "$(stamp_set)" "yes"
 is "  no snooze line" "$(printf '%s\n' "$out" | grep -c '  snoozed$')" "0"
 is "  no phone ping" "$(wh_n)" "0"
 
+# The first press misses (Hammerspoon slow, window not found); the next poll
+# presses again rather than leaving the dialog up.
+route_clear
+rm -f "$TMP/dismissed" "$TMP/missed-once"
+: >"$TMP/dialog-n"
+export GTG_DISMISS_CMD="if [ -e '$TMP/missed-once' ]; then touch '$TMP/dismissed'; printf 1; else touch '$TMP/missed-once'; printf 0; fi"
+export GTG_ELSEWHERE_ROW=$'pull-ups\t5\taway\t\t'
+out=$(./bin/gtg-nudge 2>&1)
+unset GTG_ELSEWHERE_ROW
+is "a missed press is tried again" "$(printf '%s\n' "$out" | grep -c 'dismissed: logged elsewhere')" "1"
+is "  and said so once" "$(printf '%s\n' "$out" | grep -c 'could not be closed yet')" "1"
+export GTG_DISMISS_CMD="touch '$TMP/dismissed'; printf 1"
+
 resp=$(post_route '{"device":"laptop","idle":0}')
 is "the :50 retry after a set elsewhere skips as done" "$(jget "$resp" route)" "skip:done"
 is "  and the hour stays the laptop's" "$(slot_of | cut -f1)" "laptop"

@@ -211,8 +211,7 @@ local n = 0
 for _, w in ipairs(hs.axuielement.applicationElement(app):attributeValue("AXWindows") or {}) do
   local snooze = find(w, 0, "Snooze")
   if snooze and find(w, 0, "Did it") and find(w, 0, "Other...") then
-    snooze:performAction("AXPress")
-    n = n + 1
+    if snooze:performAction("AXPress") then n = n + 1 end
   end
 end
 return tostring(n)'
@@ -229,27 +228,34 @@ dismiss_dialog() {
 # Runs beside the dialog. A set logged anywhere else since the hub gave this
 # machine the hour -- the bot, the CLI, the phone -- takes the dialog down.
 # Leaves the set in $ELSEWHERE so the main script knows the Snooze was ours.
+# Bound to this dialog's pid, read once, so it can never follow a later one.
+# A press that fails is tried again next poll while the dialog is still up.
 watch_elsewhere() {
-  local url pid resp got pressed
+  local url pid="" resp got="" pressed warned=""
   url=$(cfg HUB_URL)
   while :; do
     sleep "${GTG_ELSEWHERE_POLL:-20}"
-    pid=$(cat "$DIALOG_PID" 2>/dev/null)
+    [ -n "$pid" ] || pid=$(cat "$DIALOG_PID" 2>/dev/null)
     case "$pid" in ''|*[!0-9]*) return 0 ;; esac
     kill -0 "$pid" 2>/dev/null || return 0
-    resp=$(hub_http_post "${url%/}/api/route/status" "{\"slot\":\"$ROUTE_SLOT\"}") || continue
-    got=$(printf '%s' "$resp" | /usr/bin/python3 -c 'import json,sys
+    if [ -z "$got" ]; then
+      resp=$(hub_http_post "${url%/}/api/route/status" "{\"slot\":\"$ROUTE_SLOT\"}") || continue
+      got=$(printf '%s' "$resp" | /usr/bin/python3 -c 'import json,sys
 try:
     b=json.load(sys.stdin)
 except Exception:
     b={}
 if b.get("logged") is True:
     print(b.get("what") or "a set")')
-    [ -n "$got" ] || continue
-    printf '%s' "$got" >"$ELSEWHERE"
+      [ -n "$got" ] || continue
+      printf '%s' "$got" >"$ELSEWHERE"
+    fi
     pressed=$(dismiss_dialog)
-    [ "${pressed:-0}" != 0 ] || note "logged elsewhere ($got), but the dialog could not be closed"
-    return 0
+    [ "${pressed:-0}" = 0 ] || return 0
+    if [ -z "$warned" ]; then
+      note "logged elsewhere ($got), but the dialog could not be closed yet"
+      warned=1
+    fi
   done
 }
 
@@ -507,7 +513,9 @@ if [ -e "$LOCK" ] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
   exit 0
 fi
 printf '%s' "$$" >"$LOCK"
-trap 'rm -f "$LOCK"' EXIT
+watcher=""
+trap 'rm -f "$LOCK"; if [ -n "$watcher" ]; then pkill -P "$watcher" 2>/dev/null; kill "$watcher" 2>/dev/null; fi' EXIT
+trap 'exit 143' TERM INT
 
 # Audible first, and backgrounded, so it lands even if you are looking away and
 # never delays the dialog.
@@ -611,7 +619,6 @@ or: $hint"
   DIALOG_OPENED=$(date +%s)
   ELSEWHERE="$STATE_DIR/dialog.elsewhere"
   rm -f "$ELSEWHERE"
-  watcher=""
   case "${ROUTE_RESULT:-}:${ROUTE_SLOT:-}" in
     laptop:????-??-??T??)
       watch_elsewhere &
@@ -621,6 +628,7 @@ or: $hint"
   if [ -n "$watcher" ]; then
     pkill -P "$watcher" 2>/dev/null || true
     kill "$watcher" 2>/dev/null || true
+    watcher=""
   fi
 
   # Our own Snooze press, because the set was logged somewhere else. Stamped
