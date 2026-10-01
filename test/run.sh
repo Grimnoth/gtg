@@ -2072,7 +2072,12 @@ case "${GTG_DIALOG:-snooze}" in
     while [ "$i" -lt "${GTG_DIALOG_SLEEP:-5}" ] && [ ! -e "$GTG_DISMISS_FLAG" ]; do
       sleep 1; i=$((i + 1))
     done
-    if [ -e "$GTG_DISMISS_FLAG" ]; then printf 'Snooze'; else printf '__TIMEOUT__'; fi ;;
+    if [ -e "$GTG_DISMISS_FLAG" ]; then
+      # GTG_PRESS_EMPTY: what the real laptop did, no answer and the window left up.
+      if [ -n "${GTG_PRESS_EMPTY:-}" ]; then echo 'execution error: stub (-1712)' >&2; else printf 'Snooze'; fi
+    else
+      printf '__TIMEOUT__'
+    fi ;;
   did) printf 'Did it' ;;
   off)
     if [ "$n" -eq 1 ]; then printf 'Other...'; else printf 'off'; fi ;;
@@ -2397,6 +2402,26 @@ out=$(./bin/gtg-nudge 2>&1)
 unset GTG_ELSEWHERE_ROW
 is "a missed press is tried again" "$(printf '%s\n' "$out" | grep -c 'dismissed: logged elsewhere')" "1"
 is "  and said so once" "$(printf '%s\n' "$out" | grep -c 'could not be closed yet')" "1"
+export GTG_DISMISS_CMD="touch '$TMP/dismissed'; printf 1"
+
+# The real laptop, 2026-10-01: the press ended osascript with nothing and
+# left the window up. That is still a dismissal, pressed again, never a
+# failed display handed to the phone.
+route_clear
+rm -f "$TMP/dismissed" "$TMP/presses"
+: >"$TMP/dialog-n"
+export GTG_DISMISS_CMD="touch '$TMP/dismissed'; echo x >>'$TMP/presses'; printf 1"
+export GTG_ELSEWHERE_ROW=$'pull-ups\t5\taway\t\t' GTG_PRESS_EMPTY=1
+rc=0
+out=$(./bin/gtg-nudge 2>&1) || rc=$?
+unset GTG_ELSEWHERE_ROW GTG_PRESS_EMPTY
+is "an empty answer after a set elsewhere is a dismissal" "$(printf '%s\n' "$out" | grep -c 'dismissed: logged elsewhere (pull-ups x5); the dialog answered nothing (execution error: stub (-1712)')" "1"
+is "  pressed a second time to clear the window" "$(grep -c x "$TMP/presses")" "2"
+is "  exits clean" "$rc" "0"
+is "  not a display error" "$(printf '%s\n' "$out" | grep -c 'ERROR: dialog did not display')" "0"
+is "  no phone ping" "$(wh_n)" "0"
+is "  answered as elsewhere" "$(answered_how)" "elsewhere"
+is "  and the watcher's Terminated line is gone" "$(printf '%s\n' "$out" | grep -c 'Terminated')" "0"
 export GTG_DISMISS_CMD="touch '$TMP/dismissed'; printf 1"
 
 resp=$(post_route '{"device":"laptop","idle":0}')
