@@ -2062,6 +2062,10 @@ printf '%s' "$n" >"$GTG_DIALOG_N"
 case "${GTG_DIALOG:-snooze}" in
   timeout) sleep "${GTG_DIALOG_SLEEP:-0}"; printf '__TIMEOUT__' ;;
   empty) sleep "${GTG_DIALOG_SLEEP:-0}" ;;
+  killed)
+    # The real laptop, 2026-10-02: the set lands and the dialog dies with it.
+    printf '%s\t%s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$GTG_ELSEWHERE_ROW" >>"$GTG_STATE_DIR/log.tsv"
+    exit 143 ;;
   wait)
     # Up until something presses Snooze for us, or it gives up. With
     # GTG_ELSEWHERE_ROW, that set lands on the hub while the dialog is up.
@@ -2096,7 +2100,7 @@ chmod +x "$TMP/bin/fake-osa" "$TMP/bin/fake-idle"
 export GTG_OSASCRIPT="$TMP/bin/fake-osa" GTG_IDLE_CMD="$TMP/bin/fake-idle"
 export GTG_DIALOG_LOG="$TMP/dialog-log" GTG_DIALOG_SCRIPT="$TMP/dialog-script"
 export GTG_DIALOG_N="$TMP/dialog-n" GTG_IDLE_N="$TMP/idle-n"
-export GTG_ICAL="" GTG_HS=""
+export GTG_ICAL="" GTG_HS="" GTG_EMPTY_WAIT=3 GTG_EMPTY_POLL=1
 export GTG_SSH_FAIL=1 GTG_RSYNC_FAIL=1
 export GTG_NO_CALENDAR=1 GTG_NO_PAGE=1
 route_path=$PATH
@@ -2375,7 +2379,7 @@ is "  exactly one webhook" "$(wh_n)" "1"
 is "  for that slot" "$(wh_field 0 slot)" "$(date '+%Y-%m-%dT%H')"
 
 # A set logged somewhere else while the dialog is up takes it down.
-export GTG_DISMISS_FLAG="$TMP/dismissed" GTG_ELSEWHERE_POLL=1
+export GTG_DISMISS_FLAG="$TMP/dismissed" GTG_ELSEWHERE_POLL=1 GTG_EMPTY_WAIT=3 GTG_EMPTY_POLL=1
 export GTG_DISMISS_CMD="touch '$TMP/dismissed'; printf 1"
 route_clear
 rm -f "$TMP/dismissed"
@@ -2415,13 +2419,29 @@ export GTG_ELSEWHERE_ROW=$'pull-ups\t5\taway\t\t' GTG_PRESS_EMPTY=1
 rc=0
 out=$(./bin/gtg-nudge 2>&1) || rc=$?
 unset GTG_ELSEWHERE_ROW GTG_PRESS_EMPTY
-is "an empty answer after a set elsewhere is a dismissal" "$(printf '%s\n' "$out" | grep -c 'dismissed: logged elsewhere (pull-ups x5); the dialog answered nothing (execution error: stub (-1712)')" "1"
+is "an empty answer after a set elsewhere is a dismissal" "$(printf '%s\n' "$out" | grep -c 'dismissed: logged elsewhere (pull-ups x5); the dialog answered nothing (rc=0 execution error: stub (-1712)')" "1"
 is "  pressed a second time to clear the window" "$(grep -c x "$TMP/presses")" "2"
 is "  exits clean" "$rc" "0"
 is "  not a display error" "$(printf '%s\n' "$out" | grep -c 'ERROR: dialog did not display')" "0"
 is "  no phone ping" "$(wh_n)" "0"
 is "  answered as elsewhere" "$(answered_how)" "elsewhere"
-is "  and the watcher's Terminated line is gone" "$(printf '%s\n' "$out" | grep -c 'Terminated')" "0"
+
+# The dialog dies with the set, before the watcher ever polls. The hub is
+# asked before anything is called a failed display.
+route_clear
+rm -f "$TMP/dismissed" "$TMP/presses"
+: >"$TMP/dialog-n"
+export GTG_DIALOG=killed GTG_ELSEWHERE_POLL=60 GTG_ELSEWHERE_ROW=$'squats\t10\thome\t\t'
+rc=0
+out=$(./bin/gtg-nudge 2>&1) || rc=$?
+unset GTG_ELSEWHERE_ROW
+export GTG_ELSEWHERE_POLL=1 GTG_DIALOG=wait
+is "a dialog killed as the set lands is a dismissal" "$(printf '%s\n' "$out" | grep -c 'dismissed: logged elsewhere (squats x10); the dialog answered nothing (rc=143)')" "1"
+is "  the leftover window is pressed once" "$(grep -c x "$TMP/presses")" "1"
+is "  exits clean" "$rc" "0"
+is "  no phone ping" "$(wh_n)" "0"
+is "  answered as elsewhere" "$(answered_how)" "elsewhere"
+is "the watcher's Terminated line is gone" "$(printf '%s\n' "$out" | grep -c 'Terminated')" "0"
 export GTG_DISMISS_CMD="touch '$TMP/dismissed'; printf 1"
 
 resp=$(post_route '{"device":"laptop","idle":0}')
@@ -2468,6 +2488,7 @@ if [ -n "${drop_pid:-}" ]; then
 fi
 PATH=$route_path
 unset GTG_OSASCRIPT GTG_IDLE_CMD GTG_DIALOG GTG_DIALOG_LOG GTG_DIALOG_SCRIPT GTG_DIALOG_N
+unset GTG_EMPTY_WAIT GTG_EMPTY_POLL
 unset GTG_IDLE_N GTG_ICAL GTG_HS GTG_DIALOG_SLEEP IDLE_A IDLE_B GTG_SSH_FAIL GTG_RSYNC_FAIL
 unset GTG_ROUTE_URL
 rm -f "$GTG_CONF_DIR/grok-webhook" "$GTG_CONF_DIR/token" "$GTG_CONF_DIR/home-gateway-mac" \
