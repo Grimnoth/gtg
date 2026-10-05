@@ -1009,6 +1009,9 @@ than a reminder system that quietly stops reminding and takes a week to notice.
 | `~/.local/state/gtg/outbox.tsv` | Sets the hub has not accepted yet. |
 | `~/.config/gtg/token` | Bearer token for the hub's HTTP server. `install.sh hub` creates it. On a laptop, copy it once by hand; `install.sh` does not. |
 | `~/.config/gtg/grok-webhook` | Hub only. Line 1 the phone webhook URL, line 2 the key. Mode 600. You write it. Never committed. |
+| `~/.config/gtg/oura-client.json` | Hub only. Oura OAuth app `{client_id, client_secret, redirect_uri}`. Mode 600. Never committed. |
+| `~/.config/gtg/oura-tokens.json` | Hub only. Written after Oura OAuth succeeds. Mode 600. Never committed. |
+| `~/.local/state/gtg/oura-energy.json` | Hub only. Cached `/api/energy` snapshot for the bot. |
 | `~/.local/state/gtg/slots.tsv` | Hub only. Who owns each hour: `laptop`, `phone`, `handoff`, `skip`, `answered`. |
 | `~/.local/state/gtg/log.tsv.migrated` | A `gtg backfill` proposal. Yours to inspect and move, or delete. |
 | `test/run.sh` | The test suite. Runs against a scratch dir; cannot touch your log. |

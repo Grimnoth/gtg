@@ -6,9 +6,12 @@ dashboard), except slot routing. That reads the log itself so the decision
 and the slots.tsv append share one lock.
 """
 
+import base64
+import hashlib
 import hmac
 import json
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -17,7 +20,8 @@ import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -49,6 +53,17 @@ LOG_ENV = {
 WRITE_LOCK = threading.Lock()
 PAGE_AT = [0.0]
 TOKEN = ""
+
+# Oura OAuth state is short-lived and only needed until the browser comes back.
+# Tokens and the energy cache live on disk under CONF_DIR / STATE_DIR.
+OURA_SCOPE = "daily"
+OURA_STATE_TTL = 600
+OURA_CACHE_TTL = 45 * 60
+OURA_TZ = "America/New_York"
+OURA_REDIRECT_DEFAULT = "https://bens-mac-mini.twin-viper.ts.net/gtg/oura/callback"
+OURA_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+OURA_STATES = {}
+OURA_LOCK = threading.Lock()
 
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 DEFAULT_PROTOCOL = "2025-06-18"
@@ -980,6 +995,627 @@ def authorized(header):
     return hmac.compare_digest(parts[1], TOKEN)
 
 
+
+# --- Oura readiness / sleep / activity --------------------------------------
+# Personal OAuth (authorization code + refresh). Client secrets stay in
+# ~/.config/gtg/oura-client.json; tokens in oura-tokens.json. The energy
+# snapshot for the bot is cached under STATE_DIR so /api/energy stays cheap.
+
+
+def oura_api_base():
+    return (os.environ.get("GTG_OURA_API") or "https://api.ouraring.com").rstrip("/")
+
+
+def oura_auth_base():
+    return (os.environ.get("GTG_OURA_AUTH") or "https://cloud.ouraring.com").rstrip("/")
+
+
+def oura_client_path():
+    return os.path.join(CONF_DIR, "oura-client.json")
+
+
+def oura_tokens_path():
+    return os.path.join(CONF_DIR, "oura-tokens.json")
+
+
+def oura_energy_path():
+    return os.path.join(STATE_DIR, "oura-energy.json")
+
+
+def oura_write_private(path, text):
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, text.encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+
+
+def oura_read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except OSError:
+        return None, "cannot read %s" % path
+    except ValueError:
+        return None, "not json"
+    if not isinstance(data, dict):
+        return None, "not json"
+    return data, ""
+
+
+def oura_load_client():
+    data, err = oura_read_json(oura_client_path())
+    if err:
+        return None, "oura client not configured; Ben needs ~/.config/gtg/oura-client.json on the hub"
+    for field in ("client_id", "client_secret", "redirect_uri"):
+        val = data.get(field)
+        if not isinstance(val, str) or not val.strip():
+            return None, "oura client missing %s" % field
+    return {
+        "client_id": data["client_id"].strip(),
+        "client_secret": data["client_secret"].strip(),
+        "redirect_uri": data["redirect_uri"].strip(),
+    }, ""
+
+
+def oura_load_tokens():
+    data, err = oura_read_json(oura_tokens_path())
+    if err or not data:
+        return None
+    access = data.get("access_token")
+    refresh = data.get("refresh_token")
+    if not isinstance(access, str) or not access:
+        return None
+    if not isinstance(refresh, str) or not refresh:
+        return None
+    return data
+
+
+def oura_save_tokens(payload):
+    # Never log this. Mode 600 only.
+    oura_write_private(oura_tokens_path(), json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def oura_now_local():
+    from datetime import datetime, timezone
+    try:
+        return datetime.now(ZoneInfo(OURA_TZ))
+    except ZoneInfoNotFoundError:
+        return datetime.now(timezone.utc)
+
+
+def oura_today_date():
+    return oura_now_local().date().isoformat()
+
+
+def oura_iso_now():
+    dt = oura_now_local()
+    return dt.replace(microsecond=0).isoformat()
+
+
+def oura_b64url(raw):
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def oura_pkce():
+    verifier = secrets.token_urlsafe(64)
+    if len(verifier) > 128:
+        verifier = verifier[:128]
+    challenge = oura_b64url(hashlib.sha256(verifier.encode("ascii")).digest())
+    return verifier, challenge
+
+
+def oura_http(method, url, headers=None, body=None, form=None):
+    if form is not None:
+        data = urlencode(form).encode("utf-8")
+        headers = dict(headers or {})
+        headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+    elif body is not None:
+        data = body if isinstance(body, bytes) else body.encode("utf-8")
+        headers = dict(headers or {})
+    else:
+        data = None
+        headers = dict(headers or {})
+    req = urllib.request.Request(url, data=data, method=method)
+    for key, value in headers.items():
+        req.add_header(key, value)
+    try:
+        resp = OURA_OPENER.open(req, timeout=20)
+        try:
+            code = resp.getcode()
+            raw = resp.read()
+        finally:
+            resp.close()
+    except urllib.error.HTTPError as exc:
+        try:
+            raw = exc.read()
+        except Exception:
+            raw = b""
+        try:
+            exc.close()
+        except Exception:
+            pass
+        return exc.code, raw
+    except (urllib.error.URLError, socket.timeout, TimeoutError, OSError):
+        return 0, b""
+    return code, raw
+
+
+def oura_json_http(method, url, headers=None, form=None):
+    code, raw = oura_http(method, url, headers=headers, form=form)
+    if code == 0:
+        return 0, None, "network error talking to Oura"
+    try:
+        data = json.loads(raw.decode("utf-8")) if raw else None
+    except (ValueError, UnicodeDecodeError):
+        return code, None, "Oura response was not json"
+    return code, data, ""
+
+
+def oura_store_oauth_tokens(data, prior=None):
+    prior = prior or {}
+    access = data.get("access_token")
+    refresh = data.get("refresh_token") or prior.get("refresh_token")
+    if not isinstance(access, str) or not access:
+        return "token response had no access_token"
+    if not isinstance(refresh, str) or not refresh:
+        return "token response had no refresh_token"
+    try:
+        expires_in = int(data.get("expires_in") or 86400)
+    except (TypeError, ValueError):
+        expires_in = 86400
+    scope = data.get("scope") or prior.get("scope") or OURA_SCOPE
+    if not isinstance(scope, str):
+        scope = OURA_SCOPE
+    payload = {
+        "access_token": access,
+        "refresh_token": refresh,
+        "expires_at": int(time.time()) + max(expires_in, 60),
+        "scope": scope,
+        "token_type": data.get("token_type") or "bearer",
+    }
+    oura_save_tokens(payload)
+    return ""
+
+
+def oura_refresh_access(client, tokens):
+    code, data, err = oura_json_http(
+        "POST",
+        oura_api_base() + "/oauth/token",
+        form={
+            "grant_type": "refresh_token",
+            "refresh_token": tokens["refresh_token"],
+            "client_id": client["client_id"],
+            "client_secret": client["client_secret"],
+        },
+    )
+    if err:
+        return None, err
+    if code != 200 or not isinstance(data, dict):
+        return None, "Oura token refresh failed (%s)" % (code or "network")
+    err = oura_store_oauth_tokens(data, tokens)
+    if err:
+        return None, err
+    return oura_load_tokens(), ""
+
+
+def oura_access(client, force_refresh=False):
+    tokens = oura_load_tokens()
+    if tokens is None:
+        return None, "oura not connected; ask Ben to open the authorize URL from GET /api/oura/authorize"
+    expires_at = tokens.get("expires_at")
+    stale = True
+    if isinstance(expires_at, (int, float)) and not isinstance(expires_at, bool):
+        stale = time.time() >= float(expires_at) - 60
+    if force_refresh or stale:
+        tokens, err = oura_refresh_access(client, tokens)
+        if err:
+            return None, err
+    return tokens, ""
+
+
+def oura_get_collection(tokens, name, start_date, end_date):
+    qs = urlencode({"start_date": start_date, "end_date": end_date})
+    url = "%s/v2/usercollection/%s?%s" % (oura_api_base(), name, qs)
+    code, data, err = oura_json_http(
+        "GET", url, headers={"Authorization": "Bearer " + tokens["access_token"]}
+    )
+    if err:
+        return None, err
+    if code == 401:
+        return None, "oura unauthorized"
+    if code != 200 or not isinstance(data, dict):
+        return None, "Oura %s failed (%s)" % (name, code or "network")
+    rows = data.get("data")
+    if not isinstance(rows, list):
+        rows = []
+    return rows, ""
+
+
+def oura_pick_day(rows, day):
+    best = None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("day") == day:
+            best = row
+    return best
+
+
+def oura_score(row):
+    if not isinstance(row, dict):
+        return None
+    score = row.get("score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return None
+    return int(score)
+
+
+def oura_contributors(row):
+    if not isinstance(row, dict):
+        return {}
+    raw = row.get("contributors")
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for key, value in raw.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        out[str(key)] = int(value)
+    return out
+
+
+def oura_sleep_hours_and_efficiency(sleep_rows, day):
+    hours = 0.0
+    found = False
+    efficiency = None
+    for row in sleep_rows or []:
+        if not isinstance(row, dict):
+            continue
+        if row.get("day") != day:
+            continue
+        dur = row.get("total_sleep_duration")
+        if isinstance(dur, bool) or not isinstance(dur, (int, float)):
+            continue
+        hours += float(dur) / 3600.0
+        found = True
+        eff = row.get("efficiency")
+        if not isinstance(eff, bool) and isinstance(eff, (int, float)):
+            efficiency = int(eff)
+    if not found:
+        return None, efficiency
+    return round(hours, 2), efficiency
+
+
+def oura_rest_mode_active(rows, day):
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        start = row.get("start_day")
+        end = row.get("end_day")
+        if not isinstance(start, str) or start > day:
+            continue
+        if end is None or end == "" or (isinstance(end, str) and end >= day):
+            return True
+    return False
+
+
+def oura_coaching(readiness_score, rest_mode):
+    if readiness_score is None:
+        band = "unknown"
+        note = "No readiness score yet today; coach from how Ben feels, not invented numbers."
+    elif readiness_score >= 85:
+        band = "high"
+        note = "Readiness is high; a normal or harder day of sets is fine."
+    elif readiness_score >= 70:
+        band = "moderate"
+        note = "Readiness is moderate; keep the usual plan and watch for fatigue."
+    else:
+        band = "low"
+        note = "Readiness is low; prefer lighter options and recovery over pushing volume."
+    if rest_mode:
+        note = "Rest Mode is on in Oura. " + note
+    return {"band": band, "note": note}
+
+
+def oura_empty_energy(day, connected, error):
+    return {
+        "ok": False,
+        "date": day,
+        "timezone": OURA_TZ,
+        "as_of": oura_iso_now(),
+        "source": "oura",
+        "connected": connected,
+        "readiness": {"score": None, "contributors": {}},
+        "sleep": {"score": None, "total_sleep_hours": None, "efficiency": None},
+        "activity": {"score": None},
+        "coaching": {
+            "band": "unknown",
+            "note": (
+                "Oura is not connected. Ask Ben to connect via /api/oura/status "
+                "then open the URL from /api/oura/authorize."
+                if not connected
+                else "Energy data unavailable; do not invent scores."
+            ),
+        },
+        "error": error,
+    }
+
+
+def oura_build_energy(tokens):
+    day = oura_today_date()
+    readiness_rows, err = oura_get_collection(tokens, "daily_readiness", day, day)
+    if err:
+        return None, err
+    sleep_daily, err = oura_get_collection(tokens, "daily_sleep", day, day)
+    if err:
+        return None, err
+    activity_rows, err = oura_get_collection(tokens, "daily_activity", day, day)
+    if err:
+        return None, err
+    # Detailed sleep periods carry duration/efficiency; daily scope covers them.
+    sleep_periods, sleep_err = oura_get_collection(tokens, "sleep", day, day)
+    if sleep_err:
+        sleep_periods = []
+    rest_rows, rest_err = oura_get_collection(tokens, "rest_mode_period", day, day)
+    if rest_err:
+        rest_rows = []
+    ready = oura_pick_day(readiness_rows, day)
+    sleep = oura_pick_day(sleep_daily, day)
+    activity = oura_pick_day(activity_rows, day)
+    r_score = oura_score(ready)
+    s_score = oura_score(sleep)
+    a_score = oura_score(activity)
+    hours, efficiency = oura_sleep_hours_and_efficiency(sleep_periods, day)
+    if efficiency is None:
+        contrib = oura_contributors(sleep)
+        if "efficiency" in contrib:
+            efficiency = contrib["efficiency"]
+    rest_mode = oura_rest_mode_active(rest_rows, day)
+    payload = {
+        "ok": True,
+        "date": day,
+        "timezone": OURA_TZ,
+        "as_of": oura_iso_now(),
+        "source": "oura",
+        "connected": True,
+        "readiness": {"score": r_score, "contributors": oura_contributors(ready)},
+        "sleep": {
+            "score": s_score,
+            "total_sleep_hours": hours,
+            "efficiency": efficiency,
+        },
+        "activity": {"score": a_score},
+        "coaching": oura_coaching(r_score, rest_mode),
+        "error": None,
+    }
+    if rest_mode:
+        payload["rest_mode"] = True
+    return payload, ""
+
+
+def oura_save_energy(payload):
+    oura_write_private(oura_energy_path(), json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def oura_load_energy_cache():
+    data, err = oura_read_json(oura_energy_path())
+    if err or not data:
+        return None
+    return data
+
+
+def oura_cache_fresh(payload):
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        return False
+    if payload.get("date") != oura_today_date():
+        return False
+    as_of = payload.get("as_of")
+    if not isinstance(as_of, str) or not as_of:
+        return False
+    try:
+        from datetime import datetime
+        stamp = datetime.fromisoformat(as_of)
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=ZoneInfo(OURA_TZ))
+        age = (oura_now_local() - stamp.astimezone(ZoneInfo(OURA_TZ))).total_seconds()
+    except Exception:
+        return False
+    return 0 <= age <= OURA_CACHE_TTL
+
+
+def oura_pull_energy(force=False):
+    client, err = oura_load_client()
+    if err:
+        day = oura_today_date()
+        return 200, oura_empty_energy(day, False, err)
+    tokens, err = oura_access(client, force_refresh=force)
+    if err:
+        day = oura_today_date()
+        return 200, oura_empty_energy(day, False, err)
+    if not force:
+        cached = oura_load_energy_cache()
+        if oura_cache_fresh(cached):
+            return 200, cached
+    payload, err = oura_build_energy(tokens)
+    if err:
+        # One retry after a forced refresh if the access token was rejected.
+        if "unauthorized" in err:
+            tokens, refresh_err = oura_access(client, force_refresh=True)
+            if not refresh_err:
+                payload, err = oura_build_energy(tokens)
+        if err:
+            day = oura_today_date()
+            body = oura_empty_energy(day, True, err)
+            return 200, body
+    oura_save_energy(payload)
+    return 200, payload
+
+
+def oura_token_expiry_class(tokens):
+    if not tokens:
+        return "none"
+    expires_at = tokens.get("expires_at")
+    if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
+        return "unknown"
+    left = float(expires_at) - time.time()
+    if left <= 0:
+        return "expired"
+    if left <= 3600:
+        return "expiring"
+    return "valid"
+
+
+def oura_scopes_list(tokens):
+    if not tokens:
+        return []
+    scope = tokens.get("scope") or ""
+    if not isinstance(scope, str):
+        return []
+    return [part for part in scope.replace(",", " ").split() if part]
+
+
+def api_oura_status(query, body):
+    client, client_err = oura_load_client()
+    tokens = oura_load_tokens()
+    cached = oura_load_energy_cache()
+    last_pull = None
+    last_error = None
+    if isinstance(cached, dict):
+        if isinstance(cached.get("as_of"), str):
+            last_pull = cached.get("as_of")
+        if cached.get("error"):
+            last_error = cached.get("error")
+    configured = client is not None
+    connected = configured and tokens is not None
+    payload = {
+        "ok": True,
+        "configured": configured,
+        "connected": connected,
+        "scopes": oura_scopes_list(tokens) if connected else [],
+        "token_expiry": oura_token_expiry_class(tokens),
+        "last_pull": last_pull,
+        "error": None if configured else client_err,
+    }
+    if configured and not connected:
+        payload["error"] = "oura not connected; GET /api/oura/authorize and open authorize_url"
+    if connected and last_error and not cached.get("ok"):
+        payload["error"] = last_error
+    return 200, payload
+
+
+def api_oura_authorize(query, body):
+    client, err = oura_load_client()
+    if err:
+        return 400, {"ok": False, "authorize_url": None, "error": err}
+    state = secrets.token_urlsafe(24)
+    verifier, challenge = oura_pkce()
+    with OURA_LOCK:
+        # Drop expired states while we are here.
+        now = time.time()
+        dead = [k for k, v in OURA_STATES.items() if v.get("expires", 0) < now]
+        for k in dead:
+            OURA_STATES.pop(k, None)
+        OURA_STATES[state] = {
+            "expires": now + OURA_STATE_TTL,
+            "code_verifier": verifier,
+        }
+    qs = urlencode({
+        "response_type": "code",
+        "client_id": client["client_id"],
+        "redirect_uri": client["redirect_uri"],
+        "scope": OURA_SCOPE,
+        "state": state,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    })
+    url = "%s/oauth/authorize?%s" % (oura_auth_base(), qs)
+    return 200, {"ok": True, "authorize_url": url, "error": None}
+
+
+def oura_callback_html(ok, message):
+    title = "gtg oura" if ok else "gtg oura failed"
+    color = "#0a0" if ok else "#a00"
+    body = (
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<title>%s</title></head><body style=\"font-family:system-ui;padding:2rem\">"
+        "<h1 style=\"color:%s\">%s</h1><p>%s</p>"
+        "<p>You can close this tab.</p></body></html>"
+    ) % (
+        title,
+        color,
+        "Oura connected" if ok else "Oura connect failed",
+        message,
+    )
+    return body.encode("utf-8")
+
+
+def oura_exchange_code(client, code, code_verifier):
+    form = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": client["redirect_uri"],
+        "client_id": client["client_id"],
+        "client_secret": client["client_secret"],
+    }
+    if code_verifier:
+        form["code_verifier"] = code_verifier
+    code_status, data, err = oura_json_http(
+        "POST", oura_api_base() + "/oauth/token", form=form
+    )
+    if err:
+        return err
+    if code_status != 200 or not isinstance(data, dict):
+        return "Oura code exchange failed (%s)" % (code_status or "network")
+    return oura_store_oauth_tokens(data)
+
+
+def handle_oura_callback(query):
+    err_param = q_first(query, "error")
+    if err_param:
+        detail = q_first(query, "error_description") or err_param
+        return 400, oura_callback_html(False, "Authorization denied: %s" % detail)
+    state = q_first(query, "state")
+    code = q_first(query, "code")
+    if not state or not code:
+        return 400, oura_callback_html(False, "Missing code or state.")
+    with OURA_LOCK:
+        entry = OURA_STATES.pop(state, None)
+    if entry is None or entry.get("expires", 0) < time.time():
+        return 400, oura_callback_html(False, "State expired or unknown. Ask for a new authorize URL.")
+    client, err = oura_load_client()
+    if err:
+        return 500, oura_callback_html(False, err)
+    err = oura_exchange_code(client, code, entry.get("code_verifier"))
+    if err:
+        return 502, oura_callback_html(False, err)
+    # Best-effort first pull so /api/energy is warm.
+    try:
+        oura_pull_energy(force=True)
+    except Exception:
+        pass
+    return 200, oura_callback_html(True, "Tokens saved on the hub. The GTG bot can read /api/energy.")
+
+
+def api_oura_refresh(query, body):
+    client, err = oura_load_client()
+    if err:
+        return 400, {"ok": False, "error": err}
+    tokens, err = oura_access(client, force_refresh=True)
+    if err:
+        return 400, {"ok": False, "error": err}
+    status, payload = oura_pull_energy(force=True)
+    return status, payload
+
+
+def api_energy(query, body):
+    return oura_pull_energy(force=False)
+
+
 def api_summary(query, body):
     return get_summary({"period": q_first(query, "period"), "days": q_first(query, "days")})
 
@@ -1010,6 +1646,10 @@ API = {
     ("POST", "/api/route/handoff"): api_route_handoff,
     ("POST", "/api/route/answered"): api_route_answered,
     ("POST", "/api/route/status"): api_route_status,
+    ("GET", "/api/oura/status"): api_oura_status,
+    ("GET", "/api/oura/authorize"): api_oura_authorize,
+    ("POST", "/api/oura/refresh"): api_oura_refresh,
+    ("GET", "/api/energy"): api_energy,
 }
 
 
@@ -1050,6 +1690,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if method == "GET" and path == "/agent.md":
             self.agent()
+            return
+        if method == "GET" and path == "/oura/callback":
+            status, raw = handle_oura_callback(query)
+            self.send_bytes(status, raw, "text/html; charset=utf-8")
             return
         if method == "POST" and path == "/mcp":
             self.mcp(body)

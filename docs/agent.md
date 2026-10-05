@@ -96,3 +96,58 @@ curl -s -X POST "$BASE/api/on" \
 URL: `https://<hub>.<tailnet>.ts.net/gtg/mcp`
 
 Same bearer token. One JSON response per request, no event stream. Tools: `log_sets`, `get_summary`, `list_movements`, `pause`, `resume`. They do the same work as the routes above, including the 422 retry: a refused `log_sets` comes back with `isError` true and the known names in the text.
+
+## Energy (Oura)
+
+The hub can expose today’s readiness, sleep, and activity for coaching context.
+Call this when energy, recovery, or “how hard should today be?” matters. Do **not**
+invent scores, diagnose, or give medical advice. If Oura is disconnected or the
+payload says `connected: false`, say so and ask Ben to connect — never fabricate
+readiness or sleep numbers.
+
+```sh
+curl -s "$BASE/api/energy" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+A connected response looks like:
+
+```json
+{
+  "ok": true,
+  "date": "YYYY-MM-DD",
+  "timezone": "America/New_York",
+  "as_of": "ISO",
+  "source": "oura",
+  "connected": true,
+  "readiness": { "score": 0-100, "contributors": {} },
+  "sleep": { "score": 0-100, "total_sleep_hours": 7.2, "efficiency": 90 },
+  "activity": { "score": 0-100 },
+  "coaching": { "band": "high|moderate|low|unknown", "note": "one short sentence" },
+  "error": null
+}
+```
+
+`coaching.band` is a non-medical heuristic from readiness: **high** ≥85,
+**moderate** 70–84, **low** <70, **unknown** if the score is missing. If Rest
+Mode is active in Oura, the note mentions it.
+
+When `connected` is false, `ok` is false and `error` says what Ben must do. Ask
+him to connect; do not guess energy.
+
+### How Ben connects Oura
+
+1. Register a personal app at [Oura Cloud](https://cloud.ouraring.com/oauth/applications) with redirect URI
+   `https://bens-mac-mini.twin-viper.ts.net/gtg/oura/callback` and scope `daily`.
+2. On the hub Mini, write `~/.config/gtg/oura-client.json` (mode 600) with
+   `client_id`, `client_secret`, and that `redirect_uri`.
+3. Check status, then open the authorize URL in a browser on Tailscale:
+
+```sh
+curl -s "$BASE/api/oura/status" -H "Authorization: Bearer $TOKEN"
+curl -s "$BASE/api/oura/authorize" -H "Authorization: Bearer $TOKEN"
+# open authorize_url; Oura redirects to /oura/callback (no Bearer needed)
+```
+
+`POST /api/oura/refresh` forces a token refresh and re-pulls today’s snapshot.
+

@@ -18,10 +18,18 @@ for f in "$REAL_HOME/.local/state/gtg/log.tsv" \
          "$REAL_HOME/.config/gtg/plan.txt" \
          "$REAL_HOME/.config/gtg/token" \
          "$REAL_HOME/.config/gtg/gcal-key.json" \
-         "$REAL_HOME/.local/state/gtg/gcal-token.json"; do
+         "$REAL_HOME/.local/state/gtg/gcal-token.json" \
+         "$REAL_HOME/.config/gtg/oura-client.json" \
+         "$REAL_HOME/.config/gtg/oura-tokens.json" \
+         "$REAL_HOME/.local/state/gtg/oura-energy.json"; do
   printf '%s\t%s\n' "$f" "$(md5 -q "$f" 2>/dev/null || echo ABSENT)" >>"$LIVE"
 done
+OURA_STUB_PID=""
 cleanup() {
+  if [ -n "${OURA_STUB_PID:-}" ]; then
+    kill "$OURA_STUB_PID" 2>/dev/null || true
+    wait "$OURA_STUB_PID" 2>/dev/null || true
+  fi
   if [ -n "${SRV_PID:-}" ]; then
     kill "$SRV_PID" 2>/dev/null || true
     wait "$SRV_PID" 2>/dev/null || true
@@ -107,6 +115,131 @@ away: pull-ups x5 | push-ups x20 | dead hang 30s
 P
 : >"$GTG_STATE_DIR/log.tsv"
 printf '%s\n' 'test-token' >"$GTG_CONF_DIR/token"
+
+cat >"$TMP/oura-stub.py" <<'OURASTUB'
+#!/usr/bin/python3
+import json
+import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlparse
+
+PORT_FILE = os.environ["GTG_OURA_STUB_PORT"]
+DAY = os.environ.get("GTG_OURA_STUB_DAY", "2026-10-05")
+
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def _read(self):
+        n = int(self.headers.get("Content-Length") or "0")
+        return self.rfile.read(n) if n else b""
+
+    def _json(self, status, payload):
+        raw = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        body = self._read().decode("utf-8")
+        form = parse_qs(body)
+        if path != "/oauth/token":
+            self._json(404, {"error": "not found"})
+            return
+        grant = (form.get("grant_type") or [""])[0]
+        if grant == "authorization_code":
+            if (form.get("code") or [""])[0] != "good-code":
+                self._json(400, {"error": "invalid_grant"})
+                return
+            if (form.get("code_verifier") or [""])[0] == "":
+                self._json(400, {"error": "missing_verifier"})
+                return
+            self._json(200, {
+                "token_type": "bearer",
+                "access_token": "access-1",
+                "refresh_token": "refresh-1",
+                "expires_in": 3600,
+                "scope": "daily",
+            })
+            return
+        if grant == "refresh_token":
+            if (form.get("refresh_token") or [""])[0] not in ("refresh-1", "refresh-2"):
+                self._json(400, {"error": "invalid_grant"})
+                return
+            self._json(200, {
+                "token_type": "bearer",
+                "access_token": "access-2",
+                "refresh_token": "refresh-2",
+                "expires_in": 7200,
+                "scope": "daily",
+            })
+            return
+        self._json(400, {"error": "bad_grant"})
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+        auth = self.headers.get("Authorization") or ""
+        if not auth.startswith("Bearer "):
+            self._json(401, {"error": "unauthorized"})
+            return
+        token = auth.split(" ", 1)[1]
+        if token not in ("access-1", "access-2"):
+            self._json(401, {"error": "unauthorized"})
+            return
+        qs = parse_qs(urlparse(self.path).query)
+        day = (qs.get("start_date") or [DAY])[0]
+        if path == "/v2/usercollection/daily_readiness":
+            self._json(200, {"data": [{
+                "id": "r1", "day": day, "score": 88,
+                "contributors": {"previous_night": 90, "sleep_balance": 80},
+                "timestamp": day + "T08:00:00-04:00",
+            }]})
+            return
+        if path == "/v2/usercollection/daily_sleep":
+            self._json(200, {"data": [{
+                "id": "s1", "day": day, "score": 82,
+                "contributors": {"efficiency": 91, "total_sleep": 85},
+                "timestamp": day + "T08:00:00-04:00",
+            }]})
+            return
+        if path == "/v2/usercollection/daily_activity":
+            self._json(200, {"data": [{
+                "id": "a1", "day": day, "score": 75,
+                "timestamp": day + "T08:00:00-04:00",
+            }]})
+            return
+        if path == "/v2/usercollection/sleep":
+            self._json(200, {"data": [{
+                "id": "p1", "day": day,
+                "total_sleep_duration": 25200,
+                "efficiency": 92,
+            }]})
+            return
+        if path == "/v2/usercollection/rest_mode_period":
+            self._json(200, {"data": []})
+            return
+        self._json(404, {"error": "not found"})
+
+
+httpd = HTTPServer(("127.0.0.1", 0), H)
+with open(PORT_FILE, "w", encoding="utf-8") as fh:
+    fh.write(str(httpd.server_address[1]))
+httpd.serve_forever()
+OURASTUB
+
+export GTG_OURA_STUB_PORT="$TMP/oura-stub.port"
+export GTG_OURA_STUB_DAY="$(/usr/bin/python3 -c 'from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo("America/New_York")).date().isoformat())')"
+/usr/bin/python3 "$TMP/oura-stub.py" >/dev/null 2>&1 &
+OURA_STUB_PID=$!
+i=0
+while [ "$i" -lt 50 ] && [ ! -s "$GTG_OURA_STUB_PORT" ]; do sleep 0.1; i=$((i+1)); done
+OURA_PORT=$(cat "$GTG_OURA_STUB_PORT")
+export GTG_OURA_API="http://127.0.0.1:$OURA_PORT"
+export GTG_OURA_AUTH="http://127.0.0.1:$OURA_PORT"
 
 PORT=$(/usr/bin/python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
 export GTG_PORT="$PORT"
@@ -244,6 +377,101 @@ else
   bad "  agent.md names the hub" "$(head -c 120 "$TMP/agent")" "the tailnet base url"
 fi
 
+if grep -qF '/api/energy' "$TMP/agent" && grep -qi 'Energy' "$TMP/agent"; then
+  ok "  agent.md mentions energy"
+else
+  bad "  agent.md mentions energy" "$(grep -n energy "$TMP/agent" | head -3)" "/api/energy"
+fi
+
+# --- Oura energy (stubbed; never hits api.ouraring.com) ---------------------
+
+code=$(curl -s -o "$TMP/body" -w '%{http_code}' --max-time 15 \
+  "${AUTH[@]}" "$BASE/api/oura/status")
+is "oura status without client is 200" "$code" "200"
+json_ok "  reports not configured" "$TMP/body" \
+  'd["ok"] is True and d["configured"] is False and d["connected"] is False and "oura-client.json" in (d["error"] or "")'
+
+code=$(curl -s -o "$TMP/body" -w '%{http_code}' --max-time 15 \
+  "${AUTH[@]}" "$BASE/api/energy")
+is "energy without client is 200" "$code" "200"
+json_ok "  disconnected, no invented scores" "$TMP/body" \
+  'd["ok"] is False and d["connected"] is False and d["readiness"]["score"] is None and d["coaching"]["band"]=="unknown" and "oura-client.json" in (d["error"] or "")'
+
+
+/usr/bin/python3 -c '
+import json, os, sys
+path = os.path.join(os.environ["GTG_CONF_DIR"], "oura-client.json")
+payload = {
+  "client_id": "test-client",
+  "client_secret": "test-secret",
+  "redirect_uri": sys.argv[1] + "/oura/callback",
+}
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+os.write(fd, json.dumps(payload).encode())
+os.close(fd)
+' "$BASE"
+
+code=$(curl -s -o "$TMP/body" -w '%{http_code}' --max-time 15 \
+  "${AUTH[@]}" "$BASE/api/oura/status")
+is "oura status with client, no tokens is 200" "$code" "200"
+json_ok "  configured but not connected" "$TMP/body" \
+  'd["ok"] is True and d["configured"] is True and d["connected"] is False and "authorize" in (d["error"] or "")'
+
+code=$(curl -s -o "$TMP/body" -w '%{http_code}' --max-time 15 \
+  "${AUTH[@]}" "$BASE/api/energy")
+is "energy not connected is 200" "$code" "200"
+json_ok "  asks Ben to connect, scores null" "$TMP/body" \
+  'd["ok"] is False and d["connected"] is False and d["readiness"]["score"] is None and "authorize" in (d["error"] or "")'
+
+code=$(curl -s -o "$TMP/body" -w '%{http_code}' --max-time 15 \
+  "${AUTH[@]}" "$BASE/api/oura/authorize")
+is "authorize is 200" "$code" "200"
+json_ok "  authorize_url has client and daily scope" "$TMP/body" \
+  'd["ok"] is True and "client_id=test-client" in d["authorize_url"] and "scope=daily" in d["authorize_url"] and "code_challenge=" in d["authorize_url"]'
+AUTH_URL=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["authorize_url"])' "$TMP/body")
+STATE=$(/usr/bin/python3 -c 'from urllib.parse import urlparse, parse_qs; import sys; print(parse_qs(urlparse(sys.argv[1]).query)["state"][0])' "$AUTH_URL")
+
+code=$(curl -s -o "$TMP/cb" -w '%{http_code}' --max-time 15 \
+  "$BASE/oura/callback?code=good-code&state=$STATE&scope=daily")
+is "callback without bearer is 200" "$code" "200"
+if grep -q 'Oura connected' "$TMP/cb"; then ok "  callback html says connected"; else
+  bad "  callback html says connected" "$(head -c 200 "$TMP/cb")" "Oura connected"
+fi
+if grep -Eiq 'access-1|refresh-1|test-secret' "$TMP/cb"; then
+  bad "  callback leaked secrets" "$(cat "$TMP/cb")" "no tokens"
+else
+  ok "  callback did not leak tokens"
+fi
+is "  tokens file mode 600" "$(stat -f '%Lp' "$GTG_CONF_DIR/oura-tokens.json")" "600"
+
+code=$(curl -s -o "$TMP/body" -w '%{http_code}' --max-time 15 \
+  "${AUTH[@]}" "$BASE/api/oura/status")
+json_ok "status connected after callback" "$TMP/body" \
+  'd["ok"] is True and d["connected"] is True and "daily" in d["scopes"]'
+
+code=$(curl -s -o "$TMP/body" -w '%{http_code}' --max-time 15 \
+  "${AUTH[@]}" "$BASE/api/energy")
+is "energy connected is 200" "$code" "200"
+json_ok "  high band from readiness 88" "$TMP/body" \
+  'd["ok"] is True and d["connected"] is True and d["readiness"]["score"]==88 and d["sleep"]["score"]==82 and d["sleep"]["total_sleep_hours"]==7.0 and d["activity"]["score"]==75 and d["coaching"]["band"]=="high" and d["error"] is None'
+is "  energy cache written" "$(test -f "$GTG_STATE_DIR/oura-energy.json" && echo yes || echo no)" "yes"
+
+code=$(curl -s -o "$TMP/body2" -w '%{http_code}' --max-time 15 \
+  "${AUTH[@]}" "$BASE/api/energy")
+is "energy cache hit is 200" "$code" "200"
+json_ok "  cache still high" "$TMP/body2" 'd["ok"] is True and d["coaching"]["band"]=="high"'
+
+code=$(curl -s -o "$TMP/body" -w '%{http_code}' --max-time 15 \
+  -X POST "${AUTH[@]}" "$BASE/api/oura/refresh" -H 'Content-Type: application/json' -d '{}')
+is "oura refresh is 200" "$code" "200"
+json_ok "  refresh still returns energy" "$TMP/body" 'd["ok"] is True and d["connected"] is True'
+
+code=$(curl -s -o "$TMP/cb" -w '%{http_code}' --max-time 15 \
+  "$BASE/oura/callback?code=good-code&state=nope")
+is "callback bad state is 400" "$code" "400"
+
+unset GTG_OURA_API GTG_OURA_AUTH GTG_OURA_STUB_PORT GTG_OURA_STUB_DAY
+
 before=$(rows)
 code=$(curl -s -o "$TMP/body" -w '%{http_code}' --max-time 15 \
   -X POST "$BASE/api/log" "${AUTH[@]}" -H 'Content-Type: application/json' \
@@ -268,7 +496,7 @@ while IFS="$(printf '\t')" read -r f want; do
   now=$(md5 -q "$f" 2>/dev/null || echo ABSENT)
   [ "$now" = "$want" ] || { mutated=$((mutated + 1)); echo "         MUTATED: $f"; }
 done <"$LIVE"
-is "live log, page, plan, token, key and cache unchanged" "$mutated" "0"
+is "live log, page, plan, token, key, oura and cache unchanged" "$mutated" "0"
 
 printf '\nserver: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
