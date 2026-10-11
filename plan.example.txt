@@ -19,6 +19,13 @@ WAKE_END=21
 #          entry, so macOS drops it without a word. Kept only for reference.
 STYLE=picker
 
+# While an app records from the microphone (a Wispr Flow dictation), the
+# dialog waits for MIC_QUIET seconds of quiet. Recording past MIC_WAIT seconds
+# skips the dialog: the hub phones the hour, or the next fire retries.
+# Defaults: MIC_QUIET=10, MIC_WAIT=300 with HUB, 600 without.
+# MIC_QUIET=10
+# MIC_WAIT=300
+
 # System sound played with every nudge. Empty to silence.
 # Others: Glass, Funk, Submarine, Hero, Sosumi, Blow, Basso
 SOUND=Ping

@@ -14,6 +14,7 @@
 //   gtg-listen --list          the input devices, one per line
 //   gtg-listen --device NAME   listen on that one
 //   gtg-listen --max 30        never run longer than this
+//   gtg-listen --busy          who is recording right now (opens nothing)
 //
 // It stops BY ITSELF. Requiring a second press to stop would double the
 // friction this exists to remove, and a recorder you have to remember to stop
@@ -88,6 +89,63 @@ func inputDevices() -> [Device] {
     // Nobody can select it on purpose; an aggregate you MADE has your name on
     // it and is untouched.
     .filter { !$0.name.hasPrefix("CADefaultDeviceAggregate") && !$0.name.isEmpty }
+}
+
+// --- who is recording -------------------------------------------------------
+// The nudge asks this before it opens a dialog. A dialog takes focus, and a
+// focus change ends a Wispr Flow dictation mid-sentence (Ben, 2026-10-11).
+//
+// Per PROCESS and input only, not the device's IsRunningSomewhere. The
+// Scarlett here is input and output in one device, so music playing through
+// it would read as a recording all day. It opens no stream and needs no
+// microphone grant: it reads what CoreAudio already knows about other apps.
+// Measured 2026-10-11 on the laptop: idle reads nothing, Wispr Flow idle
+// holds no input, and a live gtg-listen reads in=1.
+
+private func processWord(_ id: AudioObjectID, _ sel: AudioObjectPropertySelector) -> UInt32? {
+  var addr = AudioObjectPropertyAddress(
+    mSelector: sel, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+  var value: UInt32 = 0
+  var size = UInt32(MemoryLayout<UInt32>.size)
+  return AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &value) == noErr ? value : nil
+}
+
+// Unmanaged for the same +1 reason as deviceName.
+private func processBundle(_ id: AudioObjectID) -> String {
+  var addr = AudioObjectPropertyAddress(
+    mSelector: kAudioProcessPropertyBundleID,
+    mScope: kAudioObjectPropertyScopeGlobal,
+    mElement: kAudioObjectPropertyElementMain)
+  var name: Unmanaged<CFString>?
+  var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+  guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &name) == noErr, let held = name
+  else { return "" }
+  return held.takeRetainedValue() as String
+}
+
+// nil when CoreAudio would not answer, which the caller treats as unknown.
+func recordingNow() -> [String]? {
+  var addr = AudioObjectPropertyAddress(
+    mSelector: kAudioHardwarePropertyProcessObjectList,
+    mScope: kAudioObjectPropertyScopeGlobal,
+    mElement: kAudioObjectPropertyElementMain)
+  let system = AudioObjectID(kAudioObjectSystemObject)
+  var size: UInt32 = 0
+  guard AudioObjectGetPropertyDataSize(system, &addr, 0, nil, &size) == noErr else { return nil }
+  var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+  guard AudioObjectGetPropertyData(system, &addr, 0, nil, &size, &ids) == noErr else { return nil }
+  var who: [String] = []
+  for id in ids {
+    guard let input = processWord(id, kAudioProcessPropertyIsRunningInput), input != 0 else { continue }
+    let bundle = processBundle(id)
+    if !bundle.isEmpty { who.append(bundle); continue }
+    let pid = pid_t(bitPattern: processWord(id, kAudioProcessPropertyPID) ?? 0)
+    var buf = [CChar](repeating: 0, count: 256)
+    proc_name(pid, &buf, UInt32(buf.count))
+    let name = String(cString: buf)
+    who.append(name.isEmpty ? "pid \(pid)" : name)
+  }
+  return who
 }
 
 // --- plumbing ---------------------------------------------------------------
@@ -185,6 +243,12 @@ struct Main {
       case "--list":
         for d in inputDevices() { print(d.name) }
         exit(0)
+      // Exit 0 and one name per line when something is recording, 1 when
+      // nothing is, 2 when CoreAudio would not say.
+      case "--busy":
+        guard let who = recordingNow() else { exit(2) }
+        for w in who { print(w) }
+        exit(who.isEmpty ? 1 : 0)
       case "--device":
         wanted = args.isEmpty ? nil : args.removeFirst()
       case "--max":

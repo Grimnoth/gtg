@@ -527,6 +527,73 @@ watcher=""
 trap 'rm -f "$LOCK"; if [ -n "$watcher" ]; then pkill -P "$watcher" 2>/dev/null; kill "$watcher" 2>/dev/null; fi' EXIT
 trap 'exit 143' TERM INT
 
+# --- not while recording ----------------------------------------------------
+# The dialog takes focus, and a focus change ends a Wispr Flow dictation
+# mid-sentence (Ben, 2026-10-11: "it stops the recording"). So a fire that
+# finds an app recording waits until the microphone has been quiet for
+# MIC_QUIET seconds, then asks. Recording past MIC_WAIT is a call, not a
+# dictation: the hour goes to the phone through the hub, or, with no hub, the
+# slot stays unstamped and the next fire tries again.
+#
+# Inside the lock, so a later fire cannot open a second dialog meanwhile, and
+# before the Ping, which would land in the dictation. MIC_WAIT keeps the wait
+# plus the dialog inside the 30 min between fires, and with a hub inside the
+# hour, so a :50 give-up can still reach the phone.
+#
+# Fails open: no helper, or CoreAudio not answering, asks now.
+# mic_busy prints who is recording; 0 busy, 1 quiet, 2 unknown.
+mic_busy() {
+  if [ -n "${GTG_MICBUSY_CMD:-}" ]; then
+    bash -c "$GTG_MICBUSY_CMD" 2>/dev/null
+    return
+  fi
+  local helper
+  helper="$(dirname "$0")/gtg-listen"
+  [ -x "$helper" ] || return 2
+  "$helper" --busy 2>/dev/null
+}
+MIC_WAIT=$(cfg MIC_WAIT)
+case "$MIC_WAIT" in
+  ''|*[!0-9]*) if [ -n "$(cfg HUB)" ]; then MIC_WAIT=300; else MIC_WAIT=600; fi ;;
+esac
+MIC_QUIET=$(cfg MIC_QUIET)
+case "$MIC_QUIET" in ''|*[!0-9]*) MIC_QUIET=10 ;; esac
+mic_poll=${GTG_MIC_POLL:-5}
+# Quiet is timed from the first quiet READING, not a poll before it, and only
+# a busy reading can hit MIC_WAIT: a recording that ends just before the
+# deadline still gets its quiet spell and the dialog.
+waited=0; quiet_since=""; recording=""
+while :; do
+  rc=0
+  who=$(mic_busy) || rc=$?
+  who=$(printf '%s' "$who" | paste -sd, -)
+  case "$rc" in
+    0)
+      quiet_since=""
+      if [ -z "$recording" ]; then
+        recording=${who:-an app}
+        note "waiting: $recording is recording"
+      fi
+      if [ "$waited" -ge "$MIC_WAIT" ]; then
+        note "skip: recording for ${waited}s ($recording)"
+        maybe_handoff force
+        exit 0
+      fi ;;
+    1)
+      [ -n "$recording" ] || break
+      [ -n "$quiet_since" ] || quiet_since=$waited
+      if [ $(( waited - quiet_since )) -ge "$MIC_QUIET" ]; then
+        note "recording ended; asking after ${waited}s"
+        break
+      fi ;;
+    *)
+      [ -z "$recording" ] || note "microphone unreadable after ${waited}s; asking now"
+      break ;;
+  esac
+  sleep "$mic_poll"
+  waited=$(( waited + mic_poll ))
+done
+
 # Audible first, and backgrounded, so it lands even if you are looking away and
 # never delays the dialog.
 if [ -n "$sound" ] && [ -r "/System/Library/Sounds/$sound.aiff" ]; then
