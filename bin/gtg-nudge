@@ -559,22 +559,30 @@ esac
 MIC_QUIET=$(cfg MIC_QUIET)
 case "$MIC_QUIET" in ''|*[!0-9]*) MIC_QUIET=10 ;; esac
 mic_poll=${GTG_MIC_POLL:-5}
-waited=0; quiet=0; recording=""
+# Quiet is timed from the first quiet READING, not a poll before it, and only
+# a busy reading can hit MIC_WAIT: a recording that ends just before the
+# deadline still gets its quiet spell and the dialog.
+waited=0; quiet_since=""; recording=""
 while :; do
   rc=0
   who=$(mic_busy) || rc=$?
   who=$(printf '%s' "$who" | paste -sd, -)
   case "$rc" in
     0)
-      quiet=0
+      quiet_since=""
       if [ -z "$recording" ]; then
         recording=${who:-an app}
         note "waiting: $recording is recording"
+      fi
+      if [ "$waited" -ge "$MIC_WAIT" ]; then
+        note "skip: recording for ${waited}s ($recording)"
+        maybe_handoff force
+        exit 0
       fi ;;
     1)
       [ -n "$recording" ] || break
-      quiet=$(( quiet + mic_poll ))
-      if [ "$quiet" -ge "$MIC_QUIET" ]; then
+      [ -n "$quiet_since" ] || quiet_since=$waited
+      if [ $(( waited - quiet_since )) -ge "$MIC_QUIET" ]; then
         note "recording ended; asking after ${waited}s"
         break
       fi ;;
@@ -582,11 +590,6 @@ while :; do
       [ -z "$recording" ] || note "microphone unreadable after ${waited}s; asking now"
       break ;;
   esac
-  if [ "$waited" -ge "$MIC_WAIT" ]; then
-    note "skip: recording for ${waited}s ($recording)"
-    maybe_handoff force
-    exit 0
-  fi
   sleep "$mic_poll"
   waited=$(( waited + mic_poll ))
 done

@@ -2240,8 +2240,20 @@ export GTG_DIALOG=snooze IDLE_A=0 IDLE_B=0 MIC_BUSY_N=3
 out=$(./bin/gtg-nudge 2>&1)
 is "recording: the nudge waits and names who" "$(printf '%s\n' "$out" | grep -c 'waiting: com.electron.wispr-flow is recording')" "1"
 is "  then asks once it is quiet" "$(dialog_n)" "1"
-is "  after the quiet spell" "$(printf '%s\n' "$out" | grep -c 'recording ended; asking after 4s')" "1"
+is "  after a full quiet spell from the first quiet read" "$(printf '%s\n' "$out" | grep -c 'recording ended; asking after 5s')" "1"
 is "  no phone ping" "$(wh_n)" "0"
+
+# The recording ends one poll before MIC_WAIT: the quiet spell still runs out
+# and the dialog shows. The deadline only ends a wait that is still busy.
+route_clear
+: >"$TMP/dialog-n"; rm -f "$TMP/mic-n"
+sed -i '' 's/^MIC_WAIT=.*/MIC_WAIT=3/' "$GTG_CONF_DIR/plan.txt"
+export MIC_BUSY_N=3
+out=$(./bin/gtg-nudge 2>&1)
+is "quiet just before MIC_WAIT: the dialog shows" "$(dialog_n)" "1"
+is "  no skip" "$(printf '%s\n' "$out" | grep -c 'skip: recording')" "0"
+is "  no phone ping" "$(wh_n)" "0"
+sed -i '' 's/^MIC_WAIT=.*/MIC_WAIT=20/' "$GTG_CONF_DIR/plan.txt"
 
 # Quiet from the start: no wait, no extra line.
 route_clear
