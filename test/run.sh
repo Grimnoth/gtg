@@ -2096,8 +2096,20 @@ n=$((n + 1))
 printf '%s' "$n" >"$GTG_IDLE_N"
 if [ "$n" -le 1 ]; then printf '%s' "${IDLE_A:-0}"; else printf '%s' "${IDLE_B:-0}"; fi
 STUB
-chmod +x "$TMP/bin/fake-osa" "$TMP/bin/fake-idle"
+# Recording for the first MIC_BUSY_N reads, then quiet. The default is quiet,
+# so no test here ever waits on whatever the real microphone is doing.
+cat >"$TMP/bin/fake-mic" <<'STUB'
+#!/bin/bash
+n=0
+[ -f "$GTG_MIC_N" ] && n=$(cat "$GTG_MIC_N")
+n=$((n + 1))
+printf '%s' "$n" >"$GTG_MIC_N"
+if [ "$n" -le "${MIC_BUSY_N:-0}" ]; then echo com.electron.wispr-flow; exit 0; fi
+exit 1
+STUB
+chmod +x "$TMP/bin/fake-osa" "$TMP/bin/fake-idle" "$TMP/bin/fake-mic"
 export GTG_OSASCRIPT="$TMP/bin/fake-osa" GTG_IDLE_CMD="$TMP/bin/fake-idle"
+export GTG_MICBUSY_CMD="$TMP/bin/fake-mic" GTG_MIC_N="$TMP/mic-n" GTG_MIC_POLL=1 MIC_BUSY_N=0
 export GTG_DIALOG_LOG="$TMP/dialog-log" GTG_DIALOG_SCRIPT="$TMP/dialog-script"
 export GTG_DIALOG_N="$TMP/dialog-n" GTG_IDLE_N="$TMP/idle-n"
 export GTG_ICAL="" GTG_HS="" GTG_EMPTY_WAIT=3 GTG_EMPTY_POLL=1
@@ -2216,6 +2228,62 @@ sed -i '' "s/^WAKE_START=.*/WAKE_START=$w/; s/^WAKE_END=.*/WAKE_END=$((w + 1))/"
 out=$(./bin/gtg-nudge 2>&1)
 is "an asleep fire never asks the hub" "$(printf '%s\n' "$out" | grep -c 'outside waking hours')" "1"
 is "  and does not mention the hub" "$(printf '%s\n' "$out" | grep -c 'hub unreachable')" "0"
+route_plan
+printf 'HUB=mini\n' >>"$GTG_CONF_DIR/plan.txt"
+
+# Wispr Flow dictating when the nudge fires: the dialog would take focus and
+# end the recording. It waits for MIC_QUIET seconds of quiet, then asks.
+route_clear
+: >"$TMP/dialog-n"; rm -f "$TMP/mic-n"
+printf 'MIC_QUIET=2\nMIC_WAIT=20\n' >>"$GTG_CONF_DIR/plan.txt"
+export GTG_DIALOG=snooze IDLE_A=0 IDLE_B=0 MIC_BUSY_N=3
+out=$(./bin/gtg-nudge 2>&1)
+is "recording: the nudge waits and names who" "$(printf '%s\n' "$out" | grep -c 'waiting: com.electron.wispr-flow is recording')" "1"
+is "  then asks once it is quiet" "$(dialog_n)" "1"
+is "  after the quiet spell" "$(printf '%s\n' "$out" | grep -c 'recording ended; asking after 4s')" "1"
+is "  no phone ping" "$(wh_n)" "0"
+
+# Quiet from the start: no wait, no extra line.
+route_clear
+: >"$TMP/dialog-n"; rm -f "$TMP/mic-n"
+export MIC_BUSY_N=0
+out=$(./bin/gtg-nudge 2>&1)
+is "not recording: asks at once" "$(dialog_n)" "1"
+is "  and says nothing about recording" "$(printf '%s\n' "$out" | grep -c 'recording')" "0"
+
+# Still talking at MIC_WAIT is a call: no dialog, the phone gets the hour.
+route_clear
+: >"$TMP/dialog-n"; rm -f "$TMP/mic-n"
+sed -i '' 's/^MIC_WAIT=.*/MIC_WAIT=3/' "$GTG_CONF_DIR/plan.txt"
+export MIC_BUSY_N=999
+out=$(./bin/gtg-nudge 2>&1)
+is "recording past MIC_WAIT: no dialog" "$(dialog_n)" "0"
+is "  the skip is logged" "$(printf '%s\n' "$out" | grep -c 'skip: recording for 3s (com.electron.wispr-flow)')" "1"
+is "  the hour goes to the phone" "$(printf '%s\n' "$out" | grep -c 'routed: handoff')" "1"
+is "  exactly one webhook" "$(wh_n)" "1"
+is "  unstamped" "$(stamp_set)" "no"
+is "  and the lock is released" "$([ -e "$GTG_STATE_DIR/nudge.lock" ] && echo held || echo free)" "free"
+
+# An unreadable microphone fails open.
+route_clear
+: >"$TMP/dialog-n"
+GTG_MICBUSY_CMD="exit 2" ./bin/gtg-nudge >/dev/null 2>&1
+is "microphone unreadable: asks anyway" "$(dialog_n)" "1"
+export MIC_BUSY_N=0
+route_plan
+printf 'HUB=mini\n' >>"$GTG_CONF_DIR/plan.txt"
+
+# No hub: a long recording leaves the slot for the next fire.
+route_plan
+route_clear
+: >"$TMP/dialog-n"; rm -f "$TMP/mic-n"
+printf 'MIC_QUIET=2\nMIC_WAIT=2\n' >>"$GTG_CONF_DIR/plan.txt"
+export MIC_BUSY_N=999
+out=$(./bin/gtg-nudge 2>&1)
+is "no hub, recording: no dialog" "$(dialog_n)" "0"
+is "  no routing line" "$(printf '%s\n' "$out" | grep -c 'routed:')" "0"
+is "  unstamped, so the next fire retries" "$(stamp_set)" "no"
+export MIC_BUSY_N=0
 route_plan
 printf 'HUB=mini\n' >>"$GTG_CONF_DIR/plan.txt"
 
@@ -2488,7 +2556,7 @@ if [ -n "${drop_pid:-}" ]; then
 fi
 PATH=$route_path
 unset GTG_OSASCRIPT GTG_IDLE_CMD GTG_DIALOG GTG_DIALOG_LOG GTG_DIALOG_SCRIPT GTG_DIALOG_N
-unset GTG_EMPTY_WAIT GTG_EMPTY_POLL
+unset GTG_EMPTY_WAIT GTG_EMPTY_POLL GTG_MICBUSY_CMD GTG_MIC_N GTG_MIC_POLL MIC_BUSY_N
 unset GTG_IDLE_N GTG_ICAL GTG_HS GTG_DIALOG_SLEEP IDLE_A IDLE_B GTG_SSH_FAIL GTG_RSYNC_FAIL
 unset GTG_ROUTE_URL
 rm -f "$GTG_CONF_DIR/grok-webhook" "$GTG_CONF_DIR/token" "$GTG_CONF_DIR/home-gateway-mac" \

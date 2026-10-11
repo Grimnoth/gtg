@@ -883,10 +883,34 @@ the reasons behind the numbers get written down while they are fresh.
 | Nudged under 40 min ago | Logged, with how long since and when the next is due. Stops the burst launchd fires on wake. |
 | Outside the waking window | Logged, with the window it used. |
 | A meeting is in progress | Logged, **and the slot is not consumed**, so the next fire retries. |
+| An app is recording from the microphone | The dialog **waits** until the mic is quiet. See below. |
 | A macOS Focus is on | macOS drops the banner itself. Nothing we control. |
 
 A meeting *starting* within 12 minutes does not suppress anything. It changes
 the wording to "squeeze it in now".
+
+### Not while you are recording
+
+The dialog takes focus, and a focus change ends a Wispr Flow dictation in the
+middle of a sentence. So before the Ping and the dialog, the nudge asks
+`gtg-listen --busy` which apps are recording right now. That query reads what
+CoreAudio already knows. It opens no stream and needs no microphone grant.
+
+- Nothing recording: the dialog shows at once, as before.
+- Something recording: the log says `waiting: <app> is recording`. The dialog
+  shows after the mic is quiet for `MIC_QUIET` seconds (default 10).
+- Still recording after `MIC_WAIT` seconds (default 300 with a hub, 600
+  without): that is a call, not a dictation. The log says
+  `skip: recording for ...`. With a hub, the hour goes to the phone. Without
+  one, the slot stays open and the next fire tries again.
+- The helper is missing or CoreAudio does not answer: the dialog shows now.
+
+The check is per app and input only. The Scarlett here is input and output in
+one device, so a device-wide "in use" flag reads music as a recording.
+`gtg fires` counts these skips as `N recording`.
+
+The check runs only before the dialog opens. It does not protect a dictation
+that starts while the dialog is already on screen.
 
 ## Home vs away
 
@@ -974,7 +998,9 @@ reservation. Get `ME` wrong and those mute the hour.
 The calendar check never fired once in its first three weeks. The work calendar
 was never synced into macOS Calendar, and it belongs to an employer, so a signal
 built on it expires with the job. The microphone is no better on this Mac:
-Wispr Flow holds it open whenever a sentence is dictated.
+Wispr Flow holds it open whenever a sentence is dictated. That makes it the
+right signal for a different question, "is Ben dictating right now", which is
+how the nudge waits for a recording to end (see above).
 
 What the machine actually knows is its window list. Zoom names a live call
 `Zoom Meeting`, a Google Meet tab is titled `Meet – ...`, Slack names a

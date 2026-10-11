@@ -421,6 +421,7 @@ case "${1:-done}" in
       rest ~ /^skip: outside/      { so++; next }
       rest ~ /^skip: debounced/    { sd++; next }
       rest ~ /^skip: in a meeting/ { sm++; next }
+      rest ~ /^skip: recording/    { sr++; next }
       # A day turned off on purpose is not a day of dialogs ignored, and
       # counting the two together would read as a collapse in compliance.
       rest ~ /^skip: paused/       { sp++; next }
@@ -456,6 +457,7 @@ case "${1:-done}" in
         }
         printf "  skipped: %d outside hours, %d debounced, %d in a meeting", so, sd, sm
         if (sp) printf ", %d turned off", sp
+        if (sr) printf ", %d recording", sr
         if (sx) printf ", %d other", sx
         printf "\n"
         printf "  catch-up: %d shown, %d sets logged\n", cs, cl
