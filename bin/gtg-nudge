@@ -437,6 +437,8 @@ fi
 
 # --- 6. what to do ----------------------------------------------------------
 line=$(primary_option "$where")
+daily_plan_pick
+[ -z "$PLAN_PICK" ] || line="$PLAN_PICK"
 if [ "$starts_soon" = yes ]; then
   title="GTG - meeting soon"
   prompt="Meeting in a few minutes. Squeeze one in:"
@@ -693,6 +695,11 @@ else
 
 or: $hint"
   fi
+  if [ -n "$PLAN_NOTE" ]; then
+    msg="$msg
+
+$PLAN_NOTE"
+  fi
 
   DIALOG_OPENED=$(date +%s)
   ELSEWHERE="$STATE_DIR/dialog.elsewhere"
@@ -856,7 +863,20 @@ or: $hint"
       # Through record_option, not record: the line on screen may carry an
       # "@ 50 lb" this tool added, and it belongs in the weight column rather
       # than glued onto the movement name.
-      line=$(record_option "$line" "$where")
+      if [ -n "$PLAN_PICK" ]; then
+        plan_url=$(cfg HUB_URL)
+        response=$(hub_http_post "${plan_url%/}/api/log" "$PLAN_LOG_JSON") || {
+          note "ERROR: plan log not confirmed by hub; check history before retrying"
+          exit 1
+        }
+        if ! printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") is True else 1)'; then
+          note "ERROR: hub refused the plan round"
+          exit 1
+        fi
+        hub_pull >/dev/null 2>&1 || true
+      else
+        line=$(record_option "$line" "$where")
+      fi
       note "logged: $line"
       ANSWERED_HOW=log
       ;;
