@@ -720,9 +720,13 @@ PY
 daily_plan_pick() {
   PLAN_PICK=""; PLAN_NOTE=""; PLAN_LOG_JSON=""
   local url response parsed
+  [ -n "$(cfg HUB)" ] || return 0
   url=$(cfg HUB_URL)
   [ -n "$url" ] || return 0
-  response=$(hub_http_get "${url%/}/api/plan/next") || return 0
+  response=$(hub_http_get "${url%/}/api/plan/next") || {
+    note "plan unavailable: using the usual pick"
+    return 0
+  }
   parsed=$(printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys
 try:
     data=json.load(sys.stdin)

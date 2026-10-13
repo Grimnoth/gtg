@@ -50,13 +50,13 @@ class PlanAPI(unittest.TestCase):
         self.http.server_close()
         self.thread.join()
 
-    def request(self, path='/api/plan', body=None, auth=True):
+    def request(self, path='/api/plan', body=None, auth=True, timeout=2):
         headers = {'Content-Type': 'application/json'}
         if auth:
             headers['Authorization'] = 'Bearer test-token'
         req = urllib.request.Request(self.base + path, data=json.dumps(body).encode() if body is not None else None, headers=headers)
         try:
-            response = urllib.request.urlopen(req)
+            response = urllib.request.urlopen(req, timeout=timeout)
         except urllib.error.HTTPError as exc:
             response = exc
         with response:
@@ -138,6 +138,31 @@ class PlanAPI(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(self.request()[1]['plan']['slots'][3]['status'], 'done')
         self.assertEqual(self.request('/api/log', {'text': 'Push-Ups x15', 'plan_slot': '../bad'})[0], 400)
+        self.module._slot_now = lambda: '2026-10-13T13'
+        self.assertEqual(self.module.perform_route(0, False)[0], 'skip:done')
+
+    def test_plan_reads_do_not_wait_for_webhook_lock(self):
+        self.assertEqual(self.request(body=self.plan)[0], 200)
+        self.module.WRITE_LOCK.acquire()
+        try:
+            self.assertEqual(self.request('/api/plan/next', timeout=0.2)[0], 200)
+            self.assertEqual(self.request('/api/plan', timeout=0.2)[0], 200)
+        finally:
+            self.module.WRITE_LOCK.release()
+
+    def test_malformed_saved_plan_does_not_stop_phone(self):
+        self.assertEqual(self.request(body=self.plan)[0], 200)
+        captured = []
+        self.module._webhook_creds = lambda: ('https://example.invalid', 'test-key')
+        self.module._channel_context = lambda *args: ('away', 'Air Squats x10')
+        self.module._post_webhook = lambda url, key, payload: captured.append(payload)
+        for raw in ('[]', '{}', '{"slots":1}', 'not json'):
+            with self.subTest(raw=raw):
+                (self.state / 'plans/2026-10-13.json').write_text(raw)
+                self.assertEqual(self.request('/api/plan')[0], 500)
+                self.assertEqual(self.request('/api/plan/next')[0], 500)
+                self.module._send_channel('phone', '2026-10-13T12', False, 'away')
+                self.assertFalse(captured[-1]['plan']['ok'])
 
 
 if __name__ == '__main__':

@@ -864,7 +864,8 @@ $PLAN_NOTE"
       # "@ 50 lb" this tool added, and it belongs in the weight column rather
       # than glued onto the movement name.
       if [ -n "$PLAN_PICK" ]; then
-        response=$(hub_http_post "$(cfg HUB_URL)/api/log" "$PLAN_LOG_JSON") || {
+        plan_url=$(cfg HUB_URL)
+        response=$(hub_http_post "${plan_url%/}/api/log" "$PLAN_LOG_JSON") || {
           note "ERROR: plan log not confirmed by hub; check history before retrying"
           exit 1
         }

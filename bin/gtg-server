@@ -238,6 +238,7 @@ def _log_sets(args):
     if rc == 0:
         if plan_slot is not None:
             perform_answered('log', plan_slot)
+            _append_slot(plan_slot, 'skip', 'done')
         return 200, body
     # gtg turns record_batch's rc 3 into exit 1, same as a parse failure.
     # The refusal line is what distinguishes "not logged" from "could not read".
@@ -1772,6 +1773,11 @@ def _plan_progress(day):
             plan = json.load(fh)
     except FileNotFoundError:
         return {'ok': True, 'plan': None, 'progress': None}
+    try:
+        names = list(plan['targets']) + [item['movement'] for slot in plan['slots'] for item in slot['items']]
+        plan, _unknown = _validate_plan(plan, names)
+    except (KeyError, TypeError, AttributeError):
+        raise ValueError('invalid saved plan') from None
     states, totals = {}, {}
     duration_names = {item['movement'].casefold() for slot in plan['slots']
                       for item in slot['items'] if 'seconds' in item}
@@ -1816,8 +1822,7 @@ def api_plan_get(query, body):
     if not _plan_date(day):
         return 400, {'ok': False, 'error': 'date must be YYYY-MM-DD and a valid calendar date'}
     try:
-        with WRITE_LOCK:
-            return 200, _plan_progress(day)
+        return 200, _plan_progress(day)
     except (OSError, ValueError):
         return 500, {'ok': False, 'error': 'could not read plan progress'}
 
@@ -1835,8 +1840,7 @@ def _plan_next():
 
 def api_plan_next(query, body):
     try:
-        with WRITE_LOCK:
-            return 200, _plan_next()
+        return 200, _plan_next()
     except (OSError, ValueError):
         return 500, {'ok': False, 'error': 'could not read plan progress'}
 

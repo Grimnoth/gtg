@@ -2177,6 +2177,7 @@ plan_body=$(/usr/bin/python3 -c 'import json,time
 print(json.dumps({"date":time.strftime("%Y-%m-%d"), "readiness":74, "sleep":70, "band":"moderate", "note":"Easy day today", "slots":[{"hour":int(time.strftime("%H")), "items":[{"movement":"push-ups", "reps":15}, {"movement":"pull-ups", "reps":5}], "why":"Stay submax"}], "targets":{"push-ups":60}}))')
 plan_result=$(hub_http_post "http://127.0.0.1:$route_port/api/plan" "$plan_body")
 is "daily plan accepted for picker" "$(jget "$plan_result" ok)" "true"
+sed -i '' "s|^HUB_URL=.*|HUB_URL=http://127.0.0.1:$route_port/gtg/|" "$GTG_CONF_DIR/plan.txt"
 : >"$TMP/dialog-n"
 export GTG_DIALOG=did IDLE_A=0
 out=$(./bin/gtg-nudge 2>&1)
@@ -2185,6 +2186,7 @@ is "plan reason appears in dialog" "$(grep -cF 'Stay submax' "$TMP/dialog-script
 is "plan note appears in dialog" "$(grep -cF 'Easy day today' "$TMP/dialog-script")" "1"
 is "accepting plan logs both movements through hub" "$(awk -F'\t' '$2=="push-ups" && $3==15 || $2=="pull-ups" && $3==5 {n++} END {print n+0}' "$GTG_STATE_DIR/log.tsv")" "2"
 rm -f "$GTG_STATE_DIR/plans/$(date +%F).json"
+sed -i '' "s|^HUB_URL=.*|HUB_URL=http://127.0.0.1:$route_port|" "$GTG_CONF_DIR/plan.txt"
 export GTG_DIALOG=snooze
 
 route_clear
