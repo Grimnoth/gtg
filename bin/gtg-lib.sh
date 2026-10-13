@@ -678,9 +678,18 @@ hub_ssh() {
 # never printed. 25s sits above the server's 15s webhook, so a slow phone
 # ping cannot expire here and also fail open into a laptop dialog.
 hub_http_post() { # URL JSON
-  local url="$1" body="$2" token="$CONF_DIR/token"
+  hub_http_request POST "$1" "$2" 25
+}
+
+hub_http_get() { # URL
+  hub_http_request GET "$1" "" 3
+}
+
+hub_http_request() { # METHOD URL JSON TIMEOUT
+  local method="$1" url="$2" body="$3" timeout="$4" token="$CONF_DIR/token"
   [ -s "$token" ] || return 2
-  GTG_HTTP_URL="$url" GTG_HTTP_JSON="$body" GTG_HTTP_TOKEN="$token" \
+  GTG_HTTP_METHOD="$method" GTG_HTTP_TIMEOUT="$timeout" \
+    GTG_HTTP_URL="$url" GTG_HTTP_JSON="$body" GTG_HTTP_TOKEN="$token" \
     /usr/bin/python3 - <<'PY'
 import os, sys, urllib.request
 url = os.environ["GTG_HTTP_URL"]
@@ -693,11 +702,12 @@ except OSError:
     token = ""
 if not token:
     sys.exit(2)
-req = urllib.request.Request(url, data=payload, method="POST")
+method = os.environ["GTG_HTTP_METHOD"]
+req = urllib.request.Request(url, data=payload if method == "POST" else None, method=method)
 req.add_header("Content-Type", "application/json")
 req.add_header("Authorization", "Bearer " + token)
 try:
-    resp = urllib.request.urlopen(req, timeout=25)
+    resp = urllib.request.urlopen(req, timeout=int(os.environ["GTG_HTTP_TIMEOUT"]))
     try:
         sys.stdout.write(resp.read().decode("utf-8"))
     finally:
@@ -705,6 +715,46 @@ try:
 except Exception:
     sys.exit(1)
 PY
+}
+
+daily_plan_pick() {
+  PLAN_PICK=""; PLAN_NOTE=""; PLAN_LOG_JSON=""
+  local url response parsed
+  url=$(cfg HUB_URL)
+  [ -n "$url" ] || return 0
+  response=$(hub_http_get "${url%/}/api/plan/next") || return 0
+  parsed=$(printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys
+try:
+    data=json.load(sys.stdin)
+    if data.get("ok") is not True or not isinstance(data.get("plan"),dict) or not data.get("slot"):
+        sys.exit(1)
+    items=data.get("items")
+    if not isinstance(items,list) or not items:
+        sys.exit(1)
+    pieces=[]
+    for item in items:
+        name=item["movement"]
+        if not isinstance(name,str) or not name.strip() or any(c in name for c in "\r\n\t"):
+            sys.exit(1)
+        metrics=[key for key in ("reps","seconds") if key in item]
+        if len(metrics)!=1 or type(item[metrics[0]]) is not int or item[metrics[0]]<=0:
+            sys.exit(1)
+        key=metrics[0]
+        pieces.append(name + (" x%d" if key=="reps" else " %ds") % item[key])
+    text="; ".join(pieces)
+    notes=[]
+    for key in ("why","note"):
+        value=data.get(key) or ""
+        if not isinstance(value,str): sys.exit(1)
+        if value: notes.append(" ".join(value.split()))
+    print(text)
+    print(" | ".join(notes))
+    print(json.dumps({"text":text,"plan_slot":data["slot"]}))
+except (ValueError,KeyError,TypeError,AttributeError):
+    sys.exit(1)') || return 0
+  PLAN_PICK=$(printf '%s\n' "$parsed" | sed -n '1p')
+  PLAN_NOTE=$(printf '%s\n' "$parsed" | sed -n '2p')
+  PLAN_LOG_JSON=$(printf '%s\n' "$parsed" | sed -n '3p')
 }
 
 # Run gtg on the hub. Arguments are the remote argv, quoted for its shell.

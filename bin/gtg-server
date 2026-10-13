@@ -2,8 +2,8 @@
 """HTTP face for the gtg CLI.
 
 Every read and write is a subprocess of bin/gtg (or bin/gtg-page for the
-dashboard), except slot routing. That reads the log itself so the decision
-and the slots.tsv append share one lock.
+dashboard), except plans and slot routing. They read state directly and share
+the write lock with logging.
 """
 
 import base64
@@ -15,8 +15,10 @@ import secrets
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+from datetime import date
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -199,9 +201,24 @@ def resume(args):
 
 
 def log_sets(args):
+    with WRITE_LOCK:
+        return _log_sets(args)
+
+
+def _log_sets(args):
     args = as_dict(args)
     text = args.get("text")
     at = args.get("at")
+    plan_slot = args.get('plan_slot')
+    if plan_slot is not None:
+        if not _slot_key_ok(plan_slot) or plan_slot[:10] != _slot_now()[:10]:
+            return 400, {'ok': False, 'error': 'plan_slot must be a slot on today\'s plan'}
+        try:
+            plan = _plan_progress(plan_slot[:10])['plan']
+        except (OSError, ValueError):
+            return 500, {'ok': False, 'error': 'could not read plan'}
+        if plan is None or not any(slot['hour'] == int(plan_slot[11:]) for slot in plan['slots']):
+            return 400, {'ok': False, 'error': 'plan_slot must be a slot on today\'s plan'}
     new = args.get("new") is True
     if not isinstance(text, str) or not text.strip():
         return 400, {"ok": False, "output": "", "error": "text is required"}
@@ -216,9 +233,11 @@ def log_sets(args):
             stamp = "@" + stamp
         cmd.append(stamp)
     cmd.append(text)
-    rc, out, err = gtg(cmd, LOG_ENV, write=True)
+    rc, out, err = gtg(cmd, LOG_ENV)
     body = envelope(rc, out, err)
     if rc == 0:
+        if plan_slot is not None:
+            perform_answered('log', plan_slot)
         return 200, body
     # gtg turns record_batch's rc 3 into exit 1, same as a parse failure.
     # The refusal line is what distinguishes "not logged" from "could not read".
@@ -674,11 +693,16 @@ def _send_channel(event, slot, meeting, client_where=None):
         return "skip:no-webhook"
     url, key = creds
     where, pick = _channel_context(client_where, slot)
+    try:
+        plan = _plan_next()
+    except (OSError, ValueError):
+        plan = {'ok': False, 'plan': None, 'error': 'could not read plan progress'}
     payload = {
         "pick": pick,
         "where": where,
         "progress": progress_line(slot),
         "slot": slot,
+        "plan": plan,
     }
     status = _post_webhook(url, key, payload)
     if status is None:
@@ -1636,7 +1660,191 @@ def api_on(query, body):
     return resume(body)
 
 
+def _plan_date(raw):
+    if not isinstance(raw, str) or len(raw) != 10:
+        return False
+    try:
+        return date.fromisoformat(raw).isoformat() == raw
+    except ValueError:
+        return False
+
+
+def _known_plan_movements():
+    proc = subprocess.run(
+        ['/bin/bash', '-c', 'source "$1"; known_movements', '_',
+         os.path.join(HERE, 'gtg-lib.sh')],
+        capture_output=True, text=True, env=os.environ.copy(), timeout=15,
+    )
+    if proc.returncode != 0:
+        raise OSError('could not read known movements')
+    return sorted({line.split('\t', 1)[1] for line in proc.stdout.splitlines() if '\t' in line})
+
+
+def _validate_plan(body, known):
+    if not _plan_date(body.get('date')):
+        raise ValueError('date must be YYYY-MM-DD and a valid calendar date')
+    for key in ('readiness', 'sleep'):
+        if type(body.get(key)) is not int or not 0 <= body[key] <= 100:
+            raise ValueError('%s must be an integer from 0 to 100' % key)
+    if body.get('band') not in ('low', 'moderate', 'high'):
+        raise ValueError('band must be low, moderate, or high')
+    if not isinstance(body.get('note'), str):
+        raise ValueError('note must be a string')
+    if not isinstance(body.get('slots'), list) or not isinstance(body.get('targets'), dict):
+        raise ValueError('slots must be an array and targets an object')
+    names = {name.casefold(): name for name in known}
+    unknown = []
+
+    def movement(raw):
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError('movement must be a nonempty string')
+        canonical = names.get(raw.casefold())
+        if canonical is None:
+            unknown.append(raw)
+        return canonical or raw
+
+    slots, hours = [], set()
+    for slot in body['slots']:
+        if not isinstance(slot, dict) or type(slot.get('hour')) is not int or not 0 <= slot['hour'] <= 23:
+            raise ValueError('each slot needs an integer hour from 0 to 23')
+        if slot['hour'] in hours:
+            raise ValueError('slot hours must be unique')
+        hours.add(slot['hour'])
+        if not isinstance(slot.get('why', ''), str):
+            raise ValueError('why must be a string')
+        if not isinstance(slot.get('items'), list) or not slot['items']:
+            raise ValueError('each slot needs a nonempty items array')
+        items = []
+        for item in slot['items']:
+            if not isinstance(item, dict):
+                raise ValueError('each item must be an object')
+            metrics = [key for key in ('reps', 'seconds') if key in item]
+            if len(metrics) != 1 or type(item[metrics[0]]) is not int or item[metrics[0]] <= 0:
+                raise ValueError('each item needs exactly one positive integer: reps or seconds')
+            metric = metrics[0]
+            items.append({'movement': movement(item.get('movement')), metric: item[metric]})
+        slots.append({'hour': slot['hour'], 'items': items, 'why': slot.get('why', '')})
+    targets = {}
+    for name, count in body['targets'].items():
+        if type(count) is not int or count <= 0:
+            raise ValueError('each target must be a positive integer')
+        canonical = movement(name)
+        if canonical in targets:
+            raise ValueError('duplicate target movement')
+        targets[canonical] = count
+    if unknown:
+        return None, unknown
+    return {key: body[key] for key in ('date', 'readiness', 'sleep', 'band', 'note')} | {
+        'slots': sorted(slots, key=lambda slot: slot['hour']), 'targets': targets}, []
+
+
+def api_plan_post(query, body):
+    try:
+        with WRITE_LOCK:
+            known = _known_plan_movements()
+            plan, unknown = _validate_plan(body, known)
+            if unknown:
+                return 422, {'ok': False, 'error': 'unknown movement: ' + ', '.join(unknown), 'known': known}
+            directory = os.path.join(STATE_DIR, 'plans')
+            os.makedirs(directory, exist_ok=True)
+            path = os.path.join(directory, plan['date'] + '.json')
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=directory, delete=False) as fh:
+                    temporary = fh.name
+                    json.dump(plan, fh)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(temporary, path)
+            finally:
+                if temporary and os.path.exists(temporary):
+                    os.unlink(temporary)
+            return 200, {'ok': True, 'plan': plan}
+    except ValueError as exc:
+        return 400, {'ok': False, 'error': str(exc)}
+    except (OSError, subprocess.TimeoutExpired):
+        return 500, {'ok': False, 'error': 'could not store plan'}
+
+
+def _plan_progress(day):
+    try:
+        with open(os.path.join(STATE_DIR, 'plans', day + '.json'), encoding='utf-8') as fh:
+            plan = json.load(fh)
+    except FileNotFoundError:
+        return {'ok': True, 'plan': None, 'progress': None}
+    states, totals = {}, {}
+    duration_names = {item['movement'].casefold() for slot in plan['slots']
+                      for item in slot['items'] if 'seconds' in item}
+    for cols in _each_log_row():
+        if len(cols) < 3 or not cols[0].startswith(day + 'T'):
+            continue
+        key = cols[0][:13]
+        if not _is_set_row(cols):
+            if states.get(key) != 'done':
+                states[key] = 'skipped'
+            continue
+        states[key] = 'done'
+        name = cols[1].casefold()
+        raw = (cols[5] if len(cols) > 5 else '') if name in duration_names else cols[2]
+        if raw.isdigit():
+            totals[name] = totals.get(name, 0) + int(raw)
+    try:
+        with open(_slots_path(), encoding='utf-8') as fh:
+            for line in fh:
+                cols = line.rstrip('\n').split('\t')
+                if len(cols) < 4 or not cols[1].startswith(day + 'T'):
+                    continue
+                key, event, how = cols[1:4]
+                if event == 'answered' and how in ('log', 'elsewhere'):
+                    states[key] = 'done'
+                elif states.get(key) != 'done' and (event == 'skip' or (event == 'answered' and how in ('skip', 'off'))):
+                    states[key] = 'skipped'
+    except FileNotFoundError:
+        pass
+    for slot in plan['slots']:
+        slot['status'] = states.get('%sT%02d' % (day, slot['hour']), 'pending')
+    targets = {name: {'done': totals.get(name.casefold(), 0), 'target': target,
+                      'remaining': max(0, target - totals.get(name.casefold(), 0))}
+               for name, target in plan['targets'].items()}
+    return {'ok': True, 'plan': plan, 'progress': {'targets': targets}}
+
+
+def api_plan_get(query, body):
+    day = q_first(query, 'date')
+    if day is None:
+        day = _slot_now()[:10]
+    if not _plan_date(day):
+        return 400, {'ok': False, 'error': 'date must be YYYY-MM-DD and a valid calendar date'}
+    try:
+        with WRITE_LOCK:
+            return 200, _plan_progress(day)
+    except (OSError, ValueError):
+        return 500, {'ok': False, 'error': 'could not read plan progress'}
+
+
+def _plan_next():
+    now = _slot_now()
+    result = _plan_progress(now[:10])
+    plan = result['plan']
+    slot = next((slot for slot in plan['slots'] if slot['status'] == 'pending' and slot['hour'] >= int(now[11:13])), None) if plan else None
+    return {'ok': True, 'plan': plan, 'slot': '%sT%02d' % (now[:10], slot['hour']) if slot else None,
+            'items': slot['items'] if slot else [], 'why': slot['why'] if slot else '',
+            'note': plan['note'] if plan else '',
+            'remaining_targets': {name: value['remaining'] for name, value in result['progress']['targets'].items()} if plan else {}}
+
+
+def api_plan_next(query, body):
+    try:
+        with WRITE_LOCK:
+            return 200, _plan_next()
+    except (OSError, ValueError):
+        return 500, {'ok': False, 'error': 'could not read plan progress'}
+
+
 API = {
+    ("POST", "/api/plan"): api_plan_post,
+    ("GET", "/api/plan"): api_plan_get,
+    ("GET", "/api/plan/next"): api_plan_next,
     ("GET", "/api/summary"): api_summary,
     ("GET", "/api/movements"): api_movements,
     ("POST", "/api/log"): api_log,

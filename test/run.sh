@@ -2171,6 +2171,22 @@ is "  a snooze is answered" "$(answered_how)" "snooze"
 is "  and still unstamped" "$(stamp_set)" "no"
 is "  no phone ping" "$(wh_n)" "0"
 
+is "no daily plan: the usual pick is shown" "$(grep -cF "$(primary_option "$(where_am_i)")" "$TMP/dialog-script")" "1"
+route_clear
+plan_body=$(/usr/bin/python3 -c 'import json,time
+print(json.dumps({"date":time.strftime("%Y-%m-%d"), "readiness":74, "sleep":70, "band":"moderate", "note":"Easy day today", "slots":[{"hour":int(time.strftime("%H")), "items":[{"movement":"push-ups", "reps":15}, {"movement":"pull-ups", "reps":5}], "why":"Stay submax"}], "targets":{"push-ups":60}}))')
+plan_result=$(hub_http_post "http://127.0.0.1:$route_port/api/plan" "$plan_body")
+is "daily plan accepted for picker" "$(jget "$plan_result" ok)" "true"
+: >"$TMP/dialog-n"
+export GTG_DIALOG=did IDLE_A=0
+out=$(./bin/gtg-nudge 2>&1)
+is "plan round is the pre-filled pick" "$(grep -cF 'push-ups x15; pull-ups x5' "$TMP/dialog-script")" "1"
+is "plan reason appears in dialog" "$(grep -cF 'Stay submax' "$TMP/dialog-script")" "1"
+is "plan note appears in dialog" "$(grep -cF 'Easy day today' "$TMP/dialog-script")" "1"
+is "accepting plan logs both movements through hub" "$(awk -F'\t' '$2=="push-ups" && $3==15 || $2=="pull-ups" && $3==5 {n++} END {print n+0}' "$GTG_STATE_DIR/log.tsv")" "2"
+rm -f "$GTG_STATE_DIR/plans/$(date +%F).json"
+export GTG_DIALOG=snooze
+
 route_clear
 : >"$TMP/dialog-n"
 export IDLE_A=99999
@@ -2603,4 +2619,4 @@ is "the list window is ordered at spring-forward 03:00" "$(dst_ok 2026-03-08T03:
 is "  and at fall-back 01:30" "$(dst_ok 2026-11-01T01:30:00)" "ordered"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
-bash test/server.sh && [ "$fail" -eq 0 ]
+bash test/server.sh && /usr/bin/python3 test/plan.py && [ "$fail" -eq 0 ]

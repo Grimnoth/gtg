@@ -61,6 +61,61 @@ Correct `text` to a name from `known` and POST the same request again.
 
 If the movement is genuinely new, send the same body with `"new": true`. That logs the name as typed. Use it for a new movement, not to push a typo through.
 
+## Daily coaching plan
+
+Use the same Bearer token for these endpoints. Dates and slot hours use the
+hub's local time, America/New_York. Plans live under
+`~/.local/state/gtg/plans/YYYY-MM-DD.json`. Posting replaces that date only;
+other dates remain available.
+
+`POST /api/plan` accepts:
+
+```json
+{"date":"2026-10-13","readiness":74,"sleep":70,"band":"moderate","note":"Keep it easy","slots":[{"hour":10,"items":[{"movement":"Push-Ups","reps":15},{"movement":"kettlebell back stretch","seconds":30}],"why":"Stay submax"}],"targets":{"Push-Ups":60}}
+```
+
+Readiness and sleep are integers from 0 to 100. Band is `low`, `moderate`, or
+`high`. Each unique hour is 0 to 23; each item has exactly one positive integer,
+`reps` or `seconds`. `why` is optional. Slots may be empty for a rest day.
+Targets are positive integers. Names must match a known full movement name,
+ignoring letter case; stored names use the registry's spelling. Unknown names
+return HTTP 422 with `error` and a `known` array. Other invalid fields return
+400. A successful write returns `{"ok":true,"plan":{...}}`.
+
+`GET /api/plan?date=YYYY-MM-DD` defaults to today and returns:
+
+```json
+{"ok":true,"plan":{"date":"2026-10-13","slots":[{"hour":10,"items":[{"movement":"Push-Ups","reps":15}],"why":"Stay submax","status":"done"}],"targets":{"Push-Ups":60},"readiness":74,"sleep":70,"band":"moderate","note":"Keep it easy"},"progress":{"targets":{"Push-Ups":{"done":15,"target":60,"remaining":45}}}}
+```
+
+Slot status is `done`, `skipped`, or `pending`. Any non-skip set logged in that
+hour, or a `log`/`elsewhere` answer, completes the hour. A logged completion
+takes precedence over a skip. A skip row, skip route, or `skip`/`off` answer
+marks it skipped. Snooze and no answer leave it pending. Target totals include
+all sets on the date, including sets outside planned slots. Totals use seconds
+for movements planned by duration, otherwise reps.
+
+`GET /api/plan/next` returns the current hour's pending slot or the next future
+pending slot. Past pending slots remain in history but are not suggested.
+
+```json
+{"ok":true,"plan":{"date":"2026-10-13","slots":[],"targets":{"Push-Ups":60},"readiness":74,"sleep":70,"band":"moderate","note":"Keep it easy"},"slot":"2026-10-13T10","items":[{"movement":"Push-Ups","reps":15}],"why":"Stay submax","note":"Keep it easy","remaining_targets":{"Push-Ups":45}}
+```
+
+The `plan` field contains the complete plan with live slot statuses. No stored
+plan returns 200 with `plan:null`, `slot:null`, empty items and targets. When
+the plan has no eligible slot, `plan` remains populated and `slot` is null.
+This read does not claim or consume a slot. Pause still controls routing and
+desktop nudges. Phone/handoff webhooks include this whole response under `plan`.
+The desktop uses an eligible plan round as its default choice with the reason
+and note. Accepting it POSTs its round text to `/api/log`. A missing plan or
+failed suggestion fetch keeps the ordinary picker behavior.
+
+The picker includes `plan_slot`, for example `2026-10-13T13`, in `/api/log`.
+This optional field must name a slot on today's stored plan. A successful log
+also records that planned slot as answered, so accepting a future slot early
+completes the selected slot. Failed logs do not consume it.
+
 ## Summary
 
 `period` is `today`, `week`, `history`, `stats`, or `status`. `days` applies to history (default 30).
