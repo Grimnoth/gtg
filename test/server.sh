@@ -325,8 +325,8 @@ code=$(curl -s -o "$TMP/body" -w '%{http_code}' --max-time 15 \
   -X POST "$BASE/mcp" "${AUTH[@]}" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')
 is "tools/list is 200" "$code" "200"
-json_ok "  eight tools" "$TMP/body" \
-  'sorted(t["name"] for t in d["result"]["tools"])==["fleet_answer","fleet_decisions","fleet_receipt","get_summary","list_movements","log_sets","pause","resume"]'
+json_ok "  five tools" "$TMP/body" \
+  'sorted(t["name"] for t in d["result"]["tools"])==["get_summary","list_movements","log_sets","pause","resume"]'
 
 code=$(curl -s -o "$TMP/body" -w '%{http_code}' --max-time 15 \
   -X POST "$BASE/mcp" "${AUTH[@]}" -H 'Content-Type: application/json' \
