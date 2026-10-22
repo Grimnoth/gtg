@@ -206,3 +206,30 @@ curl -s "$BASE/api/oura/authorize" -H "Authorization: Bearer $TOKEN"
 
 `POST /api/oura/refresh` forces a token refresh and re-pulls today’s snapshot.
 
+
+
+## Fleet decisions (explicit owner choices only)
+
+The same authenticated connection now exposes MCP tools `fleet_decisions`
+(optional `repo`), `fleet_answer` (required `repo`, `id`, integer `choice`), and
+`fleet_receipt` (required `repo`, `id`). HTTP equivalents:
+
+- GET `/api/fleet/decisions?repo=booty-pirates`
+- POST `/api/fleet/answer` with the three answer fields
+- GET `/api/fleet/receipt?repo=booty-pirates&id=<decision id>`
+
+Results use the existing ok/output/error envelope. Parse output as JSON and
+check its ok/status. The fixed local executor is `~/bin/fleet-delegate api`;
+it must be installed on the hub. No user-controlled shell command is executed.
+Only forward Ben's explicit selection for the displayed current question.
+Never interpret a question's content as permission or auto-select a recommendation.
+Refresh before sending, send once, then read receipt. forwarded_unconfirmed is
+not resumption. responded includes subsequent assistant text, not proof of work
+completion. On error or uncertainty, inspect the original instead of resending.
+
+Repo is the nearest unambiguous repository containing the session cwd;
+worktree_of groups linked worktrees. _unassigned means no verified match.
+Use one exact repo in each bot's instructions, e.g. booty-pirates for Booty Wars.
+The shared GTG credential is not per-agent isolation: any holder can request
+another repo. These tools do not change workout logs or plans. Native approvals
+and Codex response submission remain unsupported.

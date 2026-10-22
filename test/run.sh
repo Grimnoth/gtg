@@ -2621,4 +2621,4 @@ is "the list window is ordered at spring-forward 03:00" "$(dst_ok 2026-03-08T03:
 is "  and at fall-back 01:30" "$(dst_ok 2026-11-01T01:30:00)" "ordered"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
-bash test/server.sh && /usr/bin/python3 test/plan.py && [ "$fail" -eq 0 ]
+bash test/server.sh && /usr/bin/python3 test/plan.py && /usr/bin/python3 test/fleet.py && [ "$fail" -eq 0 ]
