@@ -2355,10 +2355,12 @@ is "  the pause is on" "$([ -s "$GTG_STATE_DIR/paused" ] && echo yes || echo no)
 # First /api/route is answered by the real hub, then the reply is dropped.
 # The retry must see the phone owner and send nothing else.
 cat >"$TMP/drop-route.py" <<'PY'
-import socket, sys, threading
+import socket, sys, threading, time
 upstream = int(sys.argv[1])
 port_path = sys.argv[2]
-drop_left = [1]
+# A third argument turns this into a hub that routes, then goes silent.
+hang_status = len(sys.argv) > 3
+drop_left = [0 if hang_status else 1]
 lock = threading.Lock()
 
 def content_length(header):
@@ -2394,6 +2396,9 @@ def handle(client):
         line = req.split(b"\r\n", 1)[0]
         parts = line.split(b" ")
         drop = False
+        if hang_status and len(parts) >= 2 and parts[1] == b"/api/route/status":
+            time.sleep(60)
+            return
         if len(parts) >= 2 and parts[0] == b"POST" and parts[1] == b"/api/route":
             with lock:
                 if drop_left[0] > 0:
@@ -2554,6 +2559,70 @@ out=$(./bin/gtg-nudge 2>&1)
 is "no set elsewhere: the dialog is left alone" "$([ -e "$TMP/dismissed" ] && echo pressed || echo untouched)" "untouched"
 is "  and gives up as before" "$(printf '%s\n' "$out" | grep -c 'no answer (dismissed itself')" "1"
 is "  with no dismissal line" "$(printf '%s\n' "$out" | grep -c 'dismissed: logged elsewhere')" "0"
+
+# The empty-answer hub check is bounded by ELAPSED time, not by a count of
+# requests: a request that takes its full HTTP timeout must not stretch the
+# grace. The clock and sleep are stubs, so no run here waits for real.
+cat >"$TMP/bin/fake-clock" <<'STUB'
+#!/bin/bash
+n=0
+[ -f "$GTG_CLOCK_N" ] && n=$(cat "$GTG_CLOCK_N")
+printf '%s' $((n + 1)) >"$GTG_CLOCK_N"
+echo $((1700000000 + n * ${GTG_CLOCK_STEP:-10}))
+STUB
+cat >"$TMP/bin/fake-sleep" <<'STUB'
+#!/bin/bash
+echo "$1" >>"$GTG_SLEEP_LOG"
+STUB
+chmod +x "$TMP/bin/fake-clock" "$TMP/bin/fake-sleep"
+status_posts() { grep -c -F '"POST /api/route/status HTTP/1.1"' "$TMP/route-server.err" || true; }
+route_clear
+rm -f "$TMP/clock-n" "$TMP/sleep-log"; : >"$TMP/sleep-log"
+: >"$TMP/dialog-n"
+export GTG_DIALOG=empty GTG_DIALOG_SLEEP=0 IDLE_A=0 IDLE_B=0 GTG_EMPTY_WAIT=30 GTG_EMPTY_POLL=5
+export GTG_CLOCK_CMD="$TMP/bin/fake-clock" GTG_SLEEP_CMD="$TMP/bin/fake-sleep"
+export GTG_CLOCK_N="$TMP/clock-n" GTG_SLEEP_LOG="$TMP/sleep-log" GTG_CLOCK_STEP=10
+posts_before=$(status_posts)
+rc=0
+out=$(./bin/gtg-nudge 2>&1) || rc=$?
+posts=$(( $(status_posts) - posts_before ))
+unset GTG_CLOCK_CMD GTG_SLEEP_CMD GTG_CLOCK_N GTG_SLEEP_LOG GTG_CLOCK_STEP
+export GTG_EMPTY_WAIT=3 GTG_EMPTY_POLL=1
+is "a silent hub: the check stops when the 30s grace is spent" "$([ "$posts" -ge 1 ] && [ "$posts" -le 3 ] && echo bounded || echo "$posts requests")" "bounded"
+is "  then the failed display goes to the phone" "$rc" "1"
+is "  once" "$(wh_n)" "1"
+is "  no sleep outruns what is left of the grace" "$(awk '$1 > 5' "$TMP/sleep-log" | wc -l | tr -d ' ')" "0"
+
+# A hub that stops answering after it routes: each status request is capped to
+# what is left of the grace, so the check ends in about GTG_EMPTY_WAIT seconds
+# of real time rather than one 25s HTTP timeout per attempt.
+rm -f "$TMP/drop-port"
+/usr/bin/python3 "$TMP/drop-route.py" "$route_port" "$TMP/drop-port" hang \
+  >"$TMP/hang.out" 2>"$TMP/hang.err" &
+hang_pid=$!
+hang_port=""
+i=0
+while [ "$i" -lt 50 ]; do
+  if [ -s "$TMP/drop-port" ]; then hang_port=$(cat "$TMP/drop-port"); break; fi
+  i=$((i + 1)); sleep 0.05
+done
+is "silent-hub proxy is up" "$([ -n "$hang_port" ] && echo yes || echo no)" "yes"
+route_clear
+: >"$TMP/dialog-n"
+sed -i '' "s|^HUB_URL=.*|HUB_URL=http://127.0.0.1:$hang_port|" "$GTG_CONF_DIR/plan.txt"
+export GTG_EMPTY_WAIT=2 GTG_EMPTY_POLL=1
+t0=$(date +%s)
+rc=0
+out=$(./bin/gtg-nudge 2>&1) || rc=$?
+spent=$(( $(date +%s) - t0 ))
+export GTG_EMPTY_WAIT=3 GTG_EMPTY_POLL=1
+sed -i '' "s|^HUB_URL=.*|HUB_URL=http://127.0.0.1:$route_port|" "$GTG_CONF_DIR/plan.txt"
+kill "$hang_pid" 2>/dev/null || true
+wait "$hang_pid" 2>/dev/null || true
+hang_pid=""
+is "a hub that goes silent after routing: the check ends with the grace" "$([ "$spent" -le 8 ] && echo bounded || echo "${spent}s")" "bounded"
+is "  and still hands the failed display to the phone" "$rc" "1"
+export GTG_DIALOG=wait GTG_DIALOG_SLEEP=3
 
 route_clear
 post_route '{"device":"laptop","idle":0}' >/dev/null
