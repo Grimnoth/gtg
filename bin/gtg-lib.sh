@@ -677,8 +677,8 @@ hub_ssh() {
 # lock across the claim and the webhook. The token is read inside python and
 # never printed. 25s sits above the server's 15s webhook, so a slow phone
 # ping cannot expire here and also fail open into a laptop dialog.
-hub_http_post() { # URL JSON
-  hub_http_request POST "$1" "$2" 25
+hub_http_post() { # URL JSON [TIMEOUT]
+  hub_http_request POST "$1" "$2" "${3:-25}"
 }
 
 hub_http_get() { # URL

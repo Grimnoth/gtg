@@ -231,10 +231,12 @@ dismiss_dialog() {
 # Bound to this dialog's pid, read once, so it can never follow a later one.
 # A press that fails is tried again next poll while the dialog is still up.
 # The set logged since the hub gave this machine the hour, or nothing.
+# $1 caps the request's timeout in seconds, never above hub_http_post's 25.
 hub_logged() {
-  local url resp
+  local url resp t=${1:-25}
+  [ "$t" -le 25 ] || t=25
   url=$(cfg HUB_URL)
-  resp=$(hub_http_post "${url%/}/api/route/status" "{\"slot\":\"$ROUTE_SLOT\"}") || return 0
+  resp=$(hub_http_post "${url%/}/api/route/status" "{\"slot\":\"$ROUTE_SLOT\"}" "$t") || return 0
   printf '%s' "$resp" | /usr/bin/python3 -c 'import json,sys
 try:
     b=json.load(sys.stdin)
@@ -242,6 +244,13 @@ except Exception:
     b={}
 if b.get("logged") is True:
     print(b.get("what") or "a set")'
+}
+
+grace_clock() { # epoch seconds
+  if [ -n "${GTG_CLOCK_CMD:-}" ]; then bash -c "$GTG_CLOCK_CMD"; else date +%s; fi
+}
+grace_sleep() { # seconds
+  if [ -n "${GTG_SLEEP_CMD:-}" ]; then bash -c "$GTG_SLEEP_CMD $1"; else sleep "$1"; fi
 }
 
 watch_elsewhere() {
@@ -740,12 +749,21 @@ $PLAN_NOTE"
   if [ -z "$answer" ] && [ ! -s "$ELSEWHERE" ]; then
     case "${ROUTE_RESULT:-}:${ROUTE_SLOT:-}" in
       laptop:????-??-??T??)
-        tries=$(( ${GTG_EMPTY_WAIT:-30} / ${GTG_EMPTY_POLL:-5} ))
-        while [ "$tries" -gt 0 ]; do
-          got=$(hub_logged)
+        # Bounded by elapsed time, each request capped to what is left: an
+        # attempt count let a hub that stopped answering stretch the grace to
+        # one 25s HTTP timeout per attempt. GTG_CLOCK_CMD and GTG_SLEEP_CMD
+        # are the tests' seams, so no test waits in real time.
+        deadline=$(( $(grace_clock) + ${GTG_EMPTY_WAIT:-30} ))
+        while :; do
+          left=$(( deadline - $(grace_clock) ))
+          [ "$left" -gt 0 ] || break
+          got=$(hub_logged "$left")
           if [ -n "$got" ]; then printf '%s' "$got" >"$ELSEWHERE"; break; fi
-          tries=$(( tries - 1 ))
-          [ "$tries" -eq 0 ] || sleep "${GTG_EMPTY_POLL:-5}"
+          left=$(( deadline - $(grace_clock) ))
+          [ "$left" -gt 0 ] || break
+          pause=${GTG_EMPTY_POLL:-5}
+          [ "$pause" -le "$left" ] || pause=$left
+          grace_sleep "$pause"
         done ;;
     esac
   fi
