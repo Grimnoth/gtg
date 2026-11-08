@@ -152,6 +152,11 @@ class H(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
             return
         grant = (form.get("grant_type") or [""])[0]
+        mode_file = os.environ.get("GTG_OURA_STUB_MODE_FILE")
+        if grant == "refresh_token" and mode_file and os.path.exists(mode_file) \
+                and open(mode_file).read().strip() == "refresh_fail":
+            self._json(400, {"error": "invalid_grant"})
+            return
         if grant == "authorization_code":
             if (form.get("code") or [""])[0] != "good-code":
                 self._json(400, {"error": "invalid_grant"})
@@ -248,7 +253,8 @@ class H(BaseHTTPRequestHandler):
             if mode != "no_today":
                 rows += [
                     {"id": "p1", "day": DAY, "type": "sleep", "total_sleep_duration": 1800, "efficiency": 70},
-                    {"id": "p2", "day": DAY, "type": "long_sleep", "total_sleep_duration": 23400, "efficiency": 92},
+                    {"id": "p2", "day": DAY, "type": "long_sleep", "total_sleep_duration": 23400,
+                     "efficiency": None if mode == "main_eff_null" else 92},
                 ]
             self._json(200, {"data": window(rows, True)})
             return
@@ -508,9 +514,18 @@ oura_force() {
     -H 'Content-Type: application/json' -d '{}'
 }
 
+oura_force ""
+curl -s -o "$TMP/ok0" --max-time 15 "${AUTH[@]}" "$BASE/api/oura/status"
 oura_force sleep_error
 json_ok "sleep collection error is reported, not swallowed" "$TMP/body" \
-  'd["ok"] is True and d["sleep"]["total_sleep_hours"] is None and (d["sleep"]["hours_missing"] or "").startswith("oura_request_failed") and d["sleep"]["efficiency_source"]=="daily_sleep_contributor" and d["sleep"]["efficiency"]==91'
+  'd["ok"] is True and d["sleep"]["total_sleep_hours"] is None and (d["sleep"]["hours_missing"] or "").startswith("oura_request_failed") and d["sleep"]["efficiency_source"]=="daily_sleep_contributor" and d["sleep"]["efficiency"]==91 and bool(d["partial_errors"])'
+curl -s -o "$TMP/body" --max-time 15 "${AUTH[@]}" "$BASE/api/oura/status"
+json_ok "  partial pull: not a full success, data time advances" "$TMP/body" \
+  '(lambda o: d["last_attempt_status"]=="partial" and d["last_attempt_ok"] is False and d["last_success_at"]==o["last_success_at"] and d["last_data_at"]==d["last_attempt_at"] and "sleep" in (d["last_error"] or ""))(json.load(open("'"$TMP"'/ok0")))'
+
+oura_force main_eff_null
+json_ok "main sleep without efficiency: nap not used, daily fallback" "$TMP/body" \
+  'd["sleep"]["efficiency"]==91 and d["sleep"]["efficiency_source"]=="daily_sleep_contributor" and d["sleep"]["total_sleep_hours"]==7.0'
 
 oura_force activity_none
 json_ok "activity with no row today: null + reason, yesterday not substituted" "$TMP/body" \
@@ -532,6 +547,12 @@ json_ok "failed pull returns no scores and last success time" "$TMP/body" \
 curl -s -o "$TMP/body" --max-time 15 "${AUTH[@]}" "$BASE/api/oura/status"
 json_ok "  status separates failed attempt from last success" "$TMP/body" \
   '(lambda o: d["last_attempt_ok"] is False and bool(d["last_error"]) and d["last_attempt_at"]>=d["last_success_at"] and d["last_success_at"]==o["last_success_at"] and bool(d["error"]))(json.load(open("'"$TMP"'/ok")))'
+oura_force ""
+curl -s -o "$TMP/ok" --max-time 15 "${AUTH[@]}" "$BASE/api/oura/status"
+oura_force refresh_fail
+curl -s -o "$TMP/body" --max-time 15 "${AUTH[@]}" "$BASE/api/oura/status"
+json_ok "OAuth refresh failure is recorded as a failed attempt" "$TMP/body" \
+  '(lambda o: d["last_attempt_status"]=="failed" and d["last_success_at"]==o["last_success_at"] and "refresh" in (d["last_error"] or "").lower())(json.load(open("'"$TMP"'/ok")))'
 : >"$GTG_OURA_STUB_MODE_FILE"
 
 code=$(curl -s -o "$TMP/body" -w '%{http_code}' --max-time 15 \
