@@ -578,20 +578,29 @@ l = m.SourceFileLoader("g", sys.argv[1]); spec = u.spec_from_loader("g", l)
 g = u.module_from_spec(spec); l.exec_module(g)
 stamps = iter(["2026-01-01T00:00:%02d-05:00" % i for i in range(60)])
 lock = threading.Lock()
+kind = {}
+seen = []
 def fake_now():
     with lock:
-        return next(stamps)
+        st = next(stamps)
+        seen.append((st, kind[threading.get_ident()]))
+        return st
+def run(err):
+    kind[threading.get_ident()] = err
+    g.oura_record_attempt(err)
 g.oura_iso_now = fake_now
 import os
 os.makedirs(g.STATE_DIR, exist_ok=True)
 try: os.unlink(g.oura_pull_meta_path())
 except OSError: pass
-ts = [threading.Thread(target=g.oura_record_attempt, args=(None if i % 2 else "boom",)) for i in range(40)]
+ts = [threading.Thread(target=run, args=(None if i % 2 else "boom",)) for i in range(40)]
 [t.start() for t in ts]; [t.join() for t in ts]
 meta = json.load(open(g.oura_pull_meta_path()))
-# Every attempt got a unique increasing stamp; the latest success must win.
-print("ok" if meta["last_success_at"] and meta["last_attempt_at"] >= meta["last_success_at"]
-      and meta["last_success_at"] >= "2026-01-01T00:00:38-05:00" else "bad %r" % meta)
+# The newest successful stamp and the newest attempt must both win.
+want_ok = max(st for st, err in seen if err is None)
+want_any = max(st for st, err in seen)
+print("ok" if meta["last_success_at"] == want_ok and meta["last_attempt_at"] == want_any
+      else "bad %r" % meta)
 PY
 )
 is "concurrent attempt records keep the newest success" "$conc" "ok"
