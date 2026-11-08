@@ -175,9 +175,13 @@ A connected response looks like:
   "as_of": "ISO",
   "source": "oura",
   "connected": true,
-  "readiness": { "score": 0-100, "contributors": {} },
-  "sleep": { "score": 0-100, "total_sleep_hours": 7.2, "efficiency": 90 },
-  "activity": { "score": 0-100 },
+  "readiness": { "score": 0-100, "contributors": {}, "day": "YYYY-MM-DD", "missing": null },
+  "sleep": { "score": 0-100, "total_sleep_hours": 7.2, "efficiency": 90,
+             "efficiency_source": "sleep_period|daily_sleep_contributor",
+             "day": "YYYY-MM-DD", "missing": null, "hours_day": "YYYY-MM-DD", "hours_missing": null },
+  "activity": { "score": 0-100, "day": "YYYY-MM-DD", "missing": null },
+  "data_fresh": true,
+  "cache": { "hit": false, "fetched_at": "ISO", "age_seconds": 0, "ttl_seconds": 2700 },
   "coaching": { "band": "high|moderate|low|unknown", "note": "one short sentence" },
   "error": null
 }
@@ -186,6 +190,13 @@ A connected response looks like:
 `coaching.band` is a non-medical heuristic from readiness: **high** ≥85,
 **moderate** 70–84, **low** <70, **unknown** if the score is missing. If Rest
 Mode is active in Oura, the note mentions it.
+
+`as_of` / `cache.fetched_at` is when the hub pulled from Oura, not when Oura
+measured anything. Each section's `day` is the Oura measurement day; only rows
+for today are used, never an older day. A null value comes with a `missing`
+reason (`no_row_for_today`, `not_scored_yet`, `oura_request_failed: ...`).
+`GET /api/oura/status` reports `last_attempt_at`, `last_attempt_status` (ok|partial|failed), `last_attempt_ok`, `last_data_at`,
+`last_success_at`, `last_error` and `cached_data_day` separately.
 
 When `connected` is false, `ok` is false and `error` says what Ben must do. Ask
 him to connect; do not guess energy.
