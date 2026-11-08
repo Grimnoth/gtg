@@ -21,7 +21,8 @@ for f in "$REAL_HOME/.local/state/gtg/log.tsv" \
          "$REAL_HOME/.local/state/gtg/gcal-token.json" \
          "$REAL_HOME/.config/gtg/oura-client.json" \
          "$REAL_HOME/.config/gtg/oura-tokens.json" \
-         "$REAL_HOME/.local/state/gtg/oura-energy.json"; do
+         "$REAL_HOME/.local/state/gtg/oura-energy.json" \
+         "$REAL_HOME/.local/state/gtg/oura-pull.json"; do
   printf '%s\t%s\n' "$f" "$(md5 -q "$f" 2>/dev/null || echo ABSENT)" >>"$LIVE"
 done
 OURA_STUB_PID=""
@@ -191,33 +192,65 @@ class H(BaseHTTPRequestHandler):
             self._json(401, {"error": "unauthorized"})
             return
         qs = parse_qs(urlparse(self.path).query)
-        day = (qs.get("start_date") or [DAY])[0]
+        start = (qs.get("start_date") or [DAY])[0]
+        end = (qs.get("end_date") or [DAY])[0]
+        mode = ""
+        mode_file = os.environ.get("GTG_OURA_STUB_MODE_FILE")
+        if mode_file and os.path.exists(mode_file):
+            mode = open(mode_file).read().strip()
+        from datetime import date, timedelta
+        yday = (date.fromisoformat(DAY) - timedelta(days=1)).isoformat()
+
+        # Shapes mirror sanitized live rows. Like the real API (verified),
+        # daily_activity and sleep treat end_date as exclusive.
+        def window(rows, exclusive):
+            return [r for r in rows if start <= r["day"] and (r["day"] < end if exclusive else r["day"] <= end)]
+
+        if mode == "fail_all":
+            self._json(500, {"error": "boom"})
+            return
         if path == "/v2/usercollection/daily_readiness":
-            self._json(200, {"data": [{
-                "id": "r1", "day": day, "score": 88,
-                "contributors": {"previous_night": 90, "sleep_balance": 80},
-                "timestamp": day + "T08:00:00-04:00",
-            }]})
+            rows = [{"id": "r0", "day": yday, "score": 50, "contributors": {"previous_night": 40},
+                     "temperature_deviation": 0.1, "temperature_trend_deviation": 0.0,
+                     "timestamp": yday + "T00:00:00.000-05:00"}]
+            if mode != "no_today":
+                rows.append({"id": "r1", "day": DAY, "score": 88,
+                             "contributors": {"previous_night": 90, "sleep_balance": 80},
+                             "temperature_deviation": 0.1, "temperature_trend_deviation": 0.0,
+                             "timestamp": DAY + "T00:00:00.000-05:00"})
+            self._json(200, {"data": window(rows, False)})
             return
         if path == "/v2/usercollection/daily_sleep":
-            self._json(200, {"data": [{
-                "id": "s1", "day": day, "score": 82,
-                "contributors": {"efficiency": 91, "total_sleep": 85},
-                "timestamp": day + "T08:00:00-04:00",
-            }]})
+            rows = [{"id": "s0", "day": yday, "score": 40, "contributors": {"efficiency": 60},
+                     "timestamp": yday + "T00:00:00.000-05:00"}]
+            if mode != "no_today":
+                rows.append({"id": "s1", "day": DAY, "score": 82,
+                             "contributors": {"efficiency": 91, "total_sleep": 85},
+                             "timestamp": DAY + "T00:00:00.000-05:00"})
+            self._json(200, {"data": window(rows, False)})
             return
         if path == "/v2/usercollection/daily_activity":
-            self._json(200, {"data": [{
-                "id": "a1", "day": day, "score": 75,
-                "timestamp": day + "T08:00:00-04:00",
-            }]})
+            rows = [{"id": "a0", "day": yday, "score": 60, "steps": 1000,
+                     "timestamp": yday + "T04:00:00.000-05:00"}]
+            if mode == "activity_unscored":
+                rows.append({"id": "a1", "day": DAY, "score": None, "steps": 10,
+                             "timestamp": DAY + "T04:00:00.000-05:00"})
+            elif mode not in ("activity_none", "no_today"):
+                rows.append({"id": "a1", "day": DAY, "score": 75, "steps": 500,
+                             "timestamp": DAY + "T04:00:00.000-05:00"})
+            self._json(200, {"data": window(rows, True)})
             return
         if path == "/v2/usercollection/sleep":
-            self._json(200, {"data": [{
-                "id": "p1", "day": day,
-                "total_sleep_duration": 25200,
-                "efficiency": 92,
-            }]})
+            if mode == "sleep_error":
+                self._json(500, {"error": "boom"})
+                return
+            rows = [{"id": "p0", "day": yday, "type": "long_sleep", "total_sleep_duration": 9000, "efficiency": 60}]
+            if mode != "no_today":
+                rows += [
+                    {"id": "p1", "day": DAY, "type": "sleep", "total_sleep_duration": 1800, "efficiency": 70},
+                    {"id": "p2", "day": DAY, "type": "long_sleep", "total_sleep_duration": 23400, "efficiency": 92},
+                ]
+            self._json(200, {"data": window(rows, True)})
             return
         if path == "/v2/usercollection/rest_mode_period":
             self._json(200, {"data": []})
@@ -232,6 +265,8 @@ httpd.serve_forever()
 OURASTUB
 
 export GTG_OURA_STUB_PORT="$TMP/oura-stub.port"
+export GTG_OURA_STUB_MODE_FILE="$TMP/oura-mode"
+: >"$GTG_OURA_STUB_MODE_FILE"
 export GTG_OURA_STUB_DAY="$(/usr/bin/python3 -c 'from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo("America/New_York")).date().isoformat())')"
 /usr/bin/python3 "$TMP/oura-stub.py" >/dev/null 2>&1 &
 OURA_STUB_PID=$!
@@ -454,17 +489,55 @@ code=$(curl -s -o "$TMP/body" -w '%{http_code}' --max-time 15 \
 is "energy connected is 200" "$code" "200"
 json_ok "  high band from readiness 88" "$TMP/body" \
   'd["ok"] is True and d["connected"] is True and d["readiness"]["score"]==88 and d["sleep"]["score"]==82 and d["sleep"]["total_sleep_hours"]==7.0 and d["activity"]["score"]==75 and d["coaching"]["band"]=="high" and d["error"] is None'
+json_ok "  measurement days are today, nothing missing" "$TMP/body" \
+  '(lambda t: d["readiness"]["day"]==t and d["sleep"]["day"]==t and d["sleep"]["hours_day"]==t and d["activity"]["day"]==t and d["readiness"]["missing"] is None and d["activity"]["missing"] is None and d["sleep"]["hours_missing"] is None and d["sleep"]["efficiency"]==92 and d["sleep"]["efficiency_source"]=="sleep_period" and d["data_fresh"] is True and "cache" in d)(__import__("os").environ["GTG_OURA_STUB_DAY"])'
 is "  energy cache written" "$(test -f "$GTG_STATE_DIR/oura-energy.json" && echo yes || echo no)" "yes"
 
 code=$(curl -s -o "$TMP/body2" -w '%{http_code}' --max-time 15 \
   "${AUTH[@]}" "$BASE/api/energy")
 is "energy cache hit is 200" "$code" "200"
 json_ok "  cache still high" "$TMP/body2" 'd["ok"] is True and d["coaching"]["band"]=="high"'
+json_ok "  cache hit is labeled with fetch time" "$TMP/body2" 'd["cache"]["hit"] is True and d["cache"]["fetched_at"]==d["as_of"] and d["cache"]["age_seconds"] is not None'
+curl -s -o "$TMP/body" --max-time 15 "${AUTH[@]}" "$BASE/api/oura/status"
+json_ok "  status: success == attempt, data is today" "$TMP/body" \
+  'd["last_attempt_ok"] is True and d["last_success_at"]==d["last_attempt_at"] and d["cached_data_is_today"] is True and d["last_error"] is None'
+
+oura_force() {
+  printf '%s' "$1" >"$GTG_OURA_STUB_MODE_FILE"
+  curl -s -o "$TMP/body" --max-time 15 -X POST "${AUTH[@]}" "$BASE/api/oura/refresh" \
+    -H 'Content-Type: application/json' -d '{}'
+}
+
+oura_force sleep_error
+json_ok "sleep collection error is reported, not swallowed" "$TMP/body" \
+  'd["ok"] is True and d["sleep"]["total_sleep_hours"] is None and (d["sleep"]["hours_missing"] or "").startswith("oura_request_failed") and d["sleep"]["efficiency_source"]=="daily_sleep_contributor" and d["sleep"]["efficiency"]==91'
+
+oura_force activity_none
+json_ok "activity with no row today: null + reason, yesterday not substituted" "$TMP/body" \
+  'd["activity"]["score"] is None and d["activity"]["day"] is None and d["activity"]["missing"].startswith("no_row_for_today") and "not used" in d["activity"]["missing"]'
+
+oura_force activity_unscored
+json_ok "unfinished activity row: not_scored_yet" "$TMP/body" \
+  'd["activity"]["score"] is None and d["activity"]["day"]==__import__("os").environ["GTG_OURA_STUB_DAY"] and d["activity"]["missing"]=="not_scored_yet"'
+
+oura_force no_today
+json_ok "no rows for today: no stale scores, data_fresh false" "$TMP/body" \
+  'd["readiness"]["score"] is None and d["sleep"]["score"] is None and d["sleep"]["total_sleep_hours"] is None and d["data_fresh"] is False and d["coaching"]["band"]=="unknown"'
+
+oura_force ""
+curl -s -o "$TMP/ok" --max-time 15 "${AUTH[@]}" "$BASE/api/oura/status"
+oura_force fail_all
+json_ok "failed pull returns no scores and last success time" "$TMP/body" \
+  'd["ok"] is False and d["readiness"]["score"] is None and d["data_fresh"] is False and d["last_success_at"]'
+curl -s -o "$TMP/body" --max-time 15 "${AUTH[@]}" "$BASE/api/oura/status"
+json_ok "  status separates failed attempt from last success" "$TMP/body" \
+  '(lambda o: d["last_attempt_ok"] is False and bool(d["last_error"]) and d["last_attempt_at"]>=d["last_success_at"] and d["last_success_at"]==o["last_success_at"] and bool(d["error"]))(json.load(open("'"$TMP"'/ok")))'
+: >"$GTG_OURA_STUB_MODE_FILE"
 
 code=$(curl -s -o "$TMP/body" -w '%{http_code}' --max-time 15 \
   -X POST "${AUTH[@]}" "$BASE/api/oura/refresh" -H 'Content-Type: application/json' -d '{}')
 is "oura refresh is 200" "$code" "200"
-json_ok "  refresh still returns energy" "$TMP/body" 'd["ok"] is True and d["connected"] is True'
+json_ok "  refresh still returns energy" "$TMP/body" 'd["ok"] is True and d["connected"] is True and d["cache"]["hit"] is False'
 
 code=$(curl -s -o "$TMP/cb" -w '%{http_code}' --max-time 15 \
   "$BASE/oura/callback?code=good-code&state=nope")

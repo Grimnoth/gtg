@@ -1294,26 +1294,55 @@ def oura_contributors(row):
     return out
 
 
+def oura_num(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
 def oura_sleep_hours_and_efficiency(sleep_rows, day):
+    """Total sleep for `day` across all periods; efficiency from the main
+    (longest) period. Rows for other days are never used."""
     hours = 0.0
     found = False
     efficiency = None
+    main_dur = -1.0
     for row in sleep_rows or []:
         if not isinstance(row, dict):
             continue
         if row.get("day") != day:
             continue
-        dur = row.get("total_sleep_duration")
-        if isinstance(dur, bool) or not isinstance(dur, (int, float)):
+        dur = oura_num(row.get("total_sleep_duration"))
+        if dur is None:
             continue
         hours += float(dur) / 3600.0
         found = True
-        eff = row.get("efficiency")
-        if not isinstance(eff, bool) and isinstance(eff, (int, float)):
+        eff = oura_num(row.get("efficiency"))
+        if eff is not None and float(dur) > main_dur:
+            main_dur = float(dur)
             efficiency = int(eff)
     if not found:
         return None, efficiency
     return round(hours, 2), efficiency
+
+
+def oura_latest_day(rows):
+    days = [r.get("day") for r in rows or [] if isinstance(r, dict) and isinstance(r.get("day"), str)]
+    return max(days) if days else None
+
+
+def oura_missing_reason(rows, row, value, day, err=""):
+    """Why a value is null. None when the value is present."""
+    if value is not None:
+        return None
+    if err:
+        return "oura_request_failed: " + err
+    if row is None:
+        latest = oura_latest_day(rows)
+        if latest:
+            return "no_row_for_today (latest available day %s; not used)" % latest
+        return "no_row_for_today"
+    return "not_scored_yet"
 
 
 def oura_rest_mode_active(rows, day):
@@ -1355,9 +1384,11 @@ def oura_empty_energy(day, connected, error):
         "as_of": oura_iso_now(),
         "source": "oura",
         "connected": connected,
-        "readiness": {"score": None, "contributors": {}},
-        "sleep": {"score": None, "total_sleep_hours": None, "efficiency": None},
-        "activity": {"score": None},
+        "readiness": {"score": None, "contributors": {}, "day": None, "missing": "pull_failed"},
+        "sleep": {"score": None, "total_sleep_hours": None, "efficiency": None,
+                  "day": None, "missing": "pull_failed"},
+        "activity": {"score": None, "day": None, "missing": "pull_failed"},
+        "data_fresh": False,
         "coaching": {
             "band": "unknown",
             "note": (
@@ -1371,22 +1402,32 @@ def oura_empty_energy(day, connected, error):
     }
 
 
+def oura_window(day):
+    """Oura's end_date is exclusive for some collections (verified live for
+    daily_activity and sleep), so query [day-1, day+1] and select by `day`."""
+    from datetime import date, timedelta
+    d = date.fromisoformat(day)
+    return (d - timedelta(days=1)).isoformat(), (d + timedelta(days=1)).isoformat()
+
+
 def oura_build_energy(tokens):
     day = oura_today_date()
-    readiness_rows, err = oura_get_collection(tokens, "daily_readiness", day, day)
+    start, end = oura_window(day)
+    readiness_rows, err = oura_get_collection(tokens, "daily_readiness", start, end)
     if err:
         return None, err
-    sleep_daily, err = oura_get_collection(tokens, "daily_sleep", day, day)
+    sleep_daily, err = oura_get_collection(tokens, "daily_sleep", start, end)
     if err:
         return None, err
-    activity_rows, err = oura_get_collection(tokens, "daily_activity", day, day)
+    activity_rows, err = oura_get_collection(tokens, "daily_activity", start, end)
     if err:
         return None, err
     # Detailed sleep periods carry duration/efficiency; daily scope covers them.
-    sleep_periods, sleep_err = oura_get_collection(tokens, "sleep", day, day)
+    # A failure here is reported, not swallowed.
+    sleep_periods, sleep_err = oura_get_collection(tokens, "sleep", start, end)
     if sleep_err:
         sleep_periods = []
-    rest_rows, rest_err = oura_get_collection(tokens, "rest_mode_period", day, day)
+    rest_rows, rest_err = oura_get_collection(tokens, "rest_mode_period", start, end)
     if rest_err:
         rest_rows = []
     ready = oura_pick_day(readiness_rows, day)
@@ -1396,10 +1437,13 @@ def oura_build_energy(tokens):
     s_score = oura_score(sleep)
     a_score = oura_score(activity)
     hours, efficiency = oura_sleep_hours_and_efficiency(sleep_periods, day)
+    efficiency_source = "sleep_period" if efficiency is not None else None
     if efficiency is None:
         contrib = oura_contributors(sleep)
         if "efficiency" in contrib:
             efficiency = contrib["efficiency"]
+            efficiency_source = "daily_sleep_contributor"
+    period_row = next((r for r in sleep_periods if isinstance(r, dict) and r.get("day") == day), None)
     rest_mode = oura_rest_mode_active(rest_rows, day)
     payload = {
         "ok": True,
@@ -1408,16 +1452,33 @@ def oura_build_energy(tokens):
         "as_of": oura_iso_now(),
         "source": "oura",
         "connected": True,
-        "readiness": {"score": r_score, "contributors": oura_contributors(ready)},
+        "readiness": {
+            "score": r_score,
+            "contributors": oura_contributors(ready),
+            "day": ready.get("day") if ready else None,
+            "missing": oura_missing_reason(readiness_rows, ready, r_score, day),
+        },
         "sleep": {
             "score": s_score,
             "total_sleep_hours": hours,
             "efficiency": efficiency,
+            "efficiency_source": efficiency_source,
+            "day": sleep.get("day") if sleep else None,
+            "missing": oura_missing_reason(sleep_daily, sleep, s_score, day),
+            "hours_day": day if hours is not None else None,
+            "hours_missing": oura_missing_reason(sleep_periods, period_row, hours, day, sleep_err),
         },
-        "activity": {"score": a_score},
+        "activity": {
+            "score": a_score,
+            "day": activity.get("day") if activity else None,
+            "missing": oura_missing_reason(activity_rows, activity, a_score, day),
+        },
+        "data_fresh": bool(ready and r_score is not None),
         "coaching": oura_coaching(r_score, rest_mode),
         "error": None,
     }
+    if rest_err:
+        payload["rest_mode_error"] = rest_err
     if rest_mode:
         payload["rest_mode"] = True
     return payload, ""
@@ -1425,6 +1486,43 @@ def oura_build_energy(tokens):
 
 def oura_save_energy(payload):
     oura_write_private(oura_energy_path(), json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def oura_pull_meta_path():
+    return os.path.join(STATE_DIR, "oura-pull.json")
+
+
+def oura_load_pull_meta():
+    data, err = oura_read_json(oura_pull_meta_path())
+    return data if isinstance(data, dict) else {}
+
+
+def oura_record_attempt(error):
+    meta = oura_load_pull_meta()
+    now = oura_iso_now()
+    meta["last_attempt_at"] = now
+    meta["last_attempt_ok"] = not error
+    meta["last_error"] = error or None
+    if not error:
+        meta["last_success_at"] = now
+    try:
+        oura_write_private(oura_pull_meta_path(), json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    except Exception:
+        pass
+
+
+def oura_with_cache_info(payload, hit):
+    out = dict(payload)
+    age = None
+    try:
+        from datetime import datetime
+        stamp = datetime.fromisoformat(payload.get("as_of"))
+        age = int((oura_now_local() - stamp.astimezone(ZoneInfo(OURA_TZ))).total_seconds())
+    except Exception:
+        pass
+    out["cache"] = {"hit": hit, "fetched_at": payload.get("as_of"), "age_seconds": age,
+                    "ttl_seconds": OURA_CACHE_TTL}
+    return out
 
 
 def oura_load_energy_cache():
@@ -1465,7 +1563,7 @@ def oura_pull_energy(force=False):
     if not force:
         cached = oura_load_energy_cache()
         if oura_cache_fresh(cached):
-            return 200, cached
+            return 200, oura_with_cache_info(cached, True)
     payload, err = oura_build_energy(tokens)
     if err:
         # One retry after a forced refresh if the access token was rejected.
@@ -1474,11 +1572,15 @@ def oura_pull_energy(force=False):
             if not refresh_err:
                 payload, err = oura_build_energy(tokens)
         if err:
+            oura_record_attempt(err)
             day = oura_today_date()
             body = oura_empty_energy(day, True, err)
+            # Never pass an older cache off as today's data.
+            body["last_success_at"] = oura_load_pull_meta().get("last_success_at")
             return 200, body
+    oura_record_attempt(None)
     oura_save_energy(payload)
-    return 200, payload
+    return 200, oura_with_cache_info(payload, False)
 
 
 def oura_token_expiry_class(tokens):
@@ -1515,8 +1617,12 @@ def api_oura_status(query, body):
             last_pull = cached.get("as_of")
         if cached.get("error"):
             last_error = cached.get("error")
+    meta = oura_load_pull_meta()
+    if meta.get("last_error"):
+        last_error = meta.get("last_error")
     configured = client is not None
     connected = configured and tokens is not None
+    data_day = cached.get("date") if isinstance(cached, dict) else None
     payload = {
         "ok": True,
         "configured": configured,
@@ -1524,11 +1630,19 @@ def api_oura_status(query, body):
         "scopes": oura_scopes_list(tokens) if connected else [],
         "token_expiry": oura_token_expiry_class(tokens),
         "last_pull": last_pull,
+        "last_attempt_at": meta.get("last_attempt_at"),
+        "last_attempt_ok": meta.get("last_attempt_ok"),
+        "last_success_at": meta.get("last_success_at") or last_pull,
+        "last_error": last_error,
+        "cached_data_day": data_day,
+        "cached_data_is_today": data_day == oura_today_date() if data_day else False,
         "error": None if configured else client_err,
     }
     if configured and not connected:
         payload["error"] = "oura not connected; GET /api/oura/authorize and open authorize_url"
-    if connected and last_error and not cached.get("ok"):
+    if connected and last_error and meta.get("last_attempt_ok") is False:
+        payload["error"] = last_error
+    elif connected and last_error and isinstance(cached, dict) and not cached.get("ok"):
         payload["error"] = last_error
     return 200, payload
 
