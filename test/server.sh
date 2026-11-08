@@ -563,6 +563,15 @@ curl -s -o "$TMP/body" --max-time 15 "${AUTH[@]}" "$BASE/api/energy"
 json_ok "401 then failed refresh keeps the refresh cause" "$TMP/body" \
   'd["ok"] is False and "refresh failed" in (d["error"] or "") and "unauthorized" in (d["error"] or "") and d["readiness"]["score"] is None'
 
+: >"$GTG_OURA_STUB_MODE_FILE"
+oura_force ""
+LEGACY_AT=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["as_of"])' "$GTG_STATE_DIR/oura-energy.json")
+rm -f "$GTG_STATE_DIR/oura-pull.json"
+oura_force fail_all
+curl -s -o "$TMP/body" --max-time 15 "${AUTH[@]}" "$BASE/api/oura/status"
+json_ok "upgrade: first failed pull keeps legacy complete success time" "$TMP/body" \
+  'd["last_attempt_status"]=="failed" and d["last_success_at"]=="'"$LEGACY_AT"'"'
+
 rm -f "$GTG_STATE_DIR/oura-energy.json" "$GTG_STATE_DIR/oura-pull.json"
 oura_force sleep_error
 curl -s -o "$TMP/body" --max-time 15 "${AUTH[@]}" "$BASE/api/oura/status"

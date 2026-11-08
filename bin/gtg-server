@@ -1510,6 +1510,13 @@ def oura_record_attempt(error, partial=None):
     collections failed), failed. last_success_at only moves on ok;
     last_data_at moves on ok or partial."""
     meta = oura_load_pull_meta()
+    if not meta:
+        # First attempt after upgrade: carry over a complete legacy pull.
+        legacy = oura_load_energy_cache()
+        if isinstance(legacy, dict) and legacy.get("ok") and not legacy.get("partial_errors") \
+                and isinstance(legacy.get("as_of"), str):
+            meta["last_success_at"] = legacy["as_of"]
+            meta["last_data_at"] = legacy["as_of"]
     now = oura_iso_now()
     if error:
         status = "failed"
