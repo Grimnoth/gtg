@@ -1591,7 +1591,9 @@ def oura_pull_energy(force=False):
         # One retry after a forced refresh if the access token was rejected.
         if "unauthorized" in err:
             tokens, refresh_err = oura_access(client, force_refresh=True)
-            if not refresh_err:
+            if refresh_err:
+                err = "%s (after Oura rejected the access token: %s)" % (refresh_err, err)
+            else:
                 payload, err = oura_build_energy(tokens)
         if err:
             oura_record_attempt(err)
@@ -1656,7 +1658,11 @@ def api_oura_status(query, body):
         "last_attempt_ok": meta.get("last_attempt_ok"),
         "last_attempt_status": meta.get("last_attempt_status"),
         "last_data_at": meta.get("last_data_at") or last_pull,
-        "last_success_at": meta.get("last_success_at") or last_pull,
+        # Fall back to the cache stamp only for legacy installs with no
+        # attempt metadata and a complete cached pull.
+        "last_success_at": meta.get("last_success_at") or (
+            last_pull if not meta and isinstance(cached, dict) and cached.get("ok")
+            and not cached.get("partial_errors") else None),
         "last_error": last_error,
         "cached_data_day": data_day,
         "cached_data_is_today": data_day == oura_today_date() if data_day else False,

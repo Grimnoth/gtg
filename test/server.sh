@@ -154,7 +154,7 @@ class H(BaseHTTPRequestHandler):
         grant = (form.get("grant_type") or [""])[0]
         mode_file = os.environ.get("GTG_OURA_STUB_MODE_FILE")
         if grant == "refresh_token" and mode_file and os.path.exists(mode_file) \
-                and open(mode_file).read().strip() == "refresh_fail":
+                and open(mode_file).read().strip() in ("refresh_fail", "unauth_refresh_fail"):
             self._json(400, {"error": "invalid_grant"})
             return
         if grant == "authorization_code":
@@ -211,6 +211,9 @@ class H(BaseHTTPRequestHandler):
         def window(rows, exclusive):
             return [r for r in rows if start <= r["day"] and (r["day"] < end if exclusive else r["day"] <= end)]
 
+        if mode == "unauth_refresh_fail":
+            self._json(401, {"error": "unauthorized"})
+            return
         if mode == "fail_all":
             self._json(500, {"error": "boom"})
             return
@@ -553,6 +556,18 @@ oura_force refresh_fail
 curl -s -o "$TMP/body" --max-time 15 "${AUTH[@]}" "$BASE/api/oura/status"
 json_ok "OAuth refresh failure is recorded as a failed attempt" "$TMP/body" \
   '(lambda o: d["last_attempt_status"]=="failed" and d["last_success_at"]==o["last_success_at"] and "refresh" in (d["last_error"] or "").lower())(json.load(open("'"$TMP"'/ok")))'
+
+rm -f "$GTG_STATE_DIR/oura-energy.json"
+printf '%s' unauth_refresh_fail >"$GTG_OURA_STUB_MODE_FILE"
+curl -s -o "$TMP/body" --max-time 15 "${AUTH[@]}" "$BASE/api/energy"
+json_ok "401 then failed refresh keeps the refresh cause" "$TMP/body" \
+  'd["ok"] is False and "refresh failed" in (d["error"] or "") and "unauthorized" in (d["error"] or "") and d["readiness"]["score"] is None'
+
+rm -f "$GTG_STATE_DIR/oura-energy.json" "$GTG_STATE_DIR/oura-pull.json"
+oura_force sleep_error
+curl -s -o "$TMP/body" --max-time 15 "${AUTH[@]}" "$BASE/api/oura/status"
+json_ok "first pull partial: no last_success_at" "$TMP/body" \
+  'd["last_attempt_status"]=="partial" and d["last_success_at"] is None and d["last_data_at"]'
 : >"$GTG_OURA_STUB_MODE_FILE"
 
 code=$(curl -s -o "$TMP/body" -w '%{http_code}' --max-time 15 \
