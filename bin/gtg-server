@@ -66,6 +66,7 @@ OURA_REDIRECT_DEFAULT = "https://bens-mac-mini.twin-viper.ts.net/gtg/oura/callba
 OURA_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 OURA_STATES = {}
 OURA_LOCK = threading.Lock()
+OURA_META_LOCK = threading.Lock()
 
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 DEFAULT_PROTOCOL = "2025-06-18"
@@ -1509,6 +1510,11 @@ def oura_record_attempt(error, partial=None):
     """status: ok (complete pull), partial (core scores pulled, some
     collections failed), failed. last_success_at only moves on ok;
     last_data_at moves on ok or partial."""
+    with OURA_META_LOCK:
+        oura_record_attempt_locked(error, partial)
+
+
+def oura_record_attempt_locked(error, partial):
     meta = oura_load_pull_meta()
     if not meta:
         # First attempt after upgrade: carry over a complete legacy pull.
@@ -1532,10 +1538,16 @@ def oura_record_attempt(error, partial=None):
         meta["last_data_at"] = now
     if status == "ok":
         meta["last_success_at"] = now
+    path = oura_pull_meta_path()
+    tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
     try:
-        oura_write_private(oura_pull_meta_path(), json.dumps(meta, indent=2, sort_keys=True) + "\n")
+        oura_write_private(tmp, json.dumps(meta, indent=2, sort_keys=True) + "\n")
+        os.replace(tmp, path)
     except Exception:
-        pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def oura_with_cache_info(payload, hit):
